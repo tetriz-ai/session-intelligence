@@ -1,0 +1,341 @@
+// Copyright 2026 Workloom Solutions Private Limited
+// SPDX-License-Identifier: MIT
+
+
+syntax = "proto3";
+
+package sessionintelligence.common.v1;
+
+option go_package = "github.com/tetriz-ai/session-intelligence/gen/sessionintelligence/common/v1;commonv1";
+
+// Shared enums for the Harness Control Plane — Observe capture path (design:
+// harness-control-plane-observe). Harness-prefixed because common/v1 is shared
+// and bare names like DeviationState would be ambiguous here. The AI tool
+// dimension reuses the shared IdeType (ide_type.proto), not a new enum.
+
+// HarnessFileStatus is the upload lifecycle of a content-addressed file body.
+enum HarnessFileStatus {
+ // HARNESS_FILE_STATUS_UNSPECIFIED means the status was not populated. Treat
+ // as a programming error.
+ HARNESS_FILE_STATUS_UNSPECIFIED = 0;
+ // HARNESS_FILE_STATUS_PENDING means the content hash is reserved but its
+ // body has not been verified in object storage yet (upload in flight,
+ // crashed, or abandoned — abandoned rows are cleaned up after a TTL).
+ HARNESS_FILE_STATUS_PENDING = 1;
+ // HARNESS_FILE_STATUS_CONFIRMED means the body is verified present and
+ // hash-matched; the content is safe to share across engineers.
+ HARNESS_FILE_STATUS_CONFIRMED = 2;
+ // HARNESS_FILE_STATUS_DELETING is the orphan-body GC's durable reclaim claim:
+ // an unreferenced CONFIRMED body parked for deletion. A DELETING row is excluded
+ // from the (org, content_hash) partial unique index and from every live-body read,
+ // so a re-created same-hash body lands on a fresh row while this row's S3 object is
+ // deleted and the row hard-deleted. A crash leaves it DELETING for a retry.
+ HARNESS_FILE_STATUS_DELETING = 3;
+}
+
+// HarnessArtifactScope is where/how an artifact is placed, capturing
+// provenance: REPO_COMMITTED is enforced by the repository, the other two are
+// developer-added.
+enum HarnessArtifactScope {
+ // HARNESS_ARTIFACT_SCOPE_UNSPECIFIED means the scope was not populated.
+ // Treat as a programming error.
+ HARNESS_ARTIFACT_SCOPE_UNSPECIFIED = 0;
+ // HARNESS_ARTIFACT_SCOPE_USER_GLOBAL is personal machine-wide config
+ // (~/.claude, ~/.cursor, ...) — no repository attached.
+ HARNESS_ARTIFACT_SCOPE_USER_GLOBAL = 1;
+ // HARNESS_ARTIFACT_SCOPE_REPO_LOCAL is a file inside a repository checkout
+ // that is not committed — personal, no deviation baseline.
+ HARNESS_ARTIFACT_SCOPE_REPO_LOCAL = 2;
+ // HARNESS_ARTIFACT_SCOPE_REPO_COMMITTED is a file committed to the
+ // repository — enforced; the only scope that carries a deviation state.
+ HARNESS_ARTIFACT_SCOPE_REPO_COMMITTED = 3;
+}
+
+// HarnessArtifactType classifies the captured config primitive, normalized
+// across AI tools; the tool itself is carried by IdeType. A genuinely new
+// primitive gets its own value here (no catch-all), then the collector starts
+// capturing it.
+enum HarnessArtifactType {
+ // HARNESS_ARTIFACT_TYPE_UNSPECIFIED means the type was not populated. Treat
+ // as a programming error.
+ HARNESS_ARTIFACT_TYPE_UNSPECIFIED = 0;
+ // HARNESS_ARTIFACT_TYPE_SKILL is a skill definition.
+ HARNESS_ARTIFACT_TYPE_SKILL = 1;
+ // HARNESS_ARTIFACT_TYPE_HOOK is a lifecycle hook.
+ HARNESS_ARTIFACT_TYPE_HOOK = 2;
+ // HARNESS_ARTIFACT_TYPE_PLUGIN is an installed plugin.
+ HARNESS_ARTIFACT_TYPE_PLUGIN = 3;
+ // HARNESS_ARTIFACT_TYPE_AGENT is a custom agent / subagent definition.
+ HARNESS_ARTIFACT_TYPE_AGENT = 4;
+ // HARNESS_ARTIFACT_TYPE_RULE is a rules file (e.g. .claude/rules or
+ // .cursor/rules — IdeType says which tool).
+ HARNESS_ARTIFACT_TYPE_RULE = 5;
+ // HARNESS_ARTIFACT_TYPE_CLAUDE_MD is the Claude Code instruction file
+ // (CLAUDE.md).
+ HARNESS_ARTIFACT_TYPE_CLAUDE_MD = 6;
+ // HARNESS_ARTIFACT_TYPE_AGENTS_MD is the AGENTS.md instruction file (Codex
+ // and compatible tools).
+ HARNESS_ARTIFACT_TYPE_AGENTS_MD = 7;
+ // HARNESS_ARTIFACT_TYPE_COMMAND is a slash-command definition.
+ HARNESS_ARTIFACT_TYPE_COMMAND = 8;
+ // HARNESS_ARTIFACT_TYPE_PROMPT_TEMPLATE is a derived prompt-template data file
+ // placed by the template-hook path; a fixed dispatcher hook injects it as
+ // context on prompt submit. Gated independently of general HOOK enforcement.
+ HARNESS_ARTIFACT_TYPE_PROMPT_TEMPLATE = 9;
+ // HARNESS_ARTIFACT_TYPE_PERMISSIONS is a repo's permission set parsed from
+ // .claude/settings.json — the committed-harness type the VCS ingest writes for
+ // the permission-inventory Security detector (Harness-Improve Phase 2). One
+ // PERMISSIONS artifact per repo.
+ HARNESS_ARTIFACT_TYPE_PERMISSIONS = 10;
+}
+
+// HarnessDeviationState says whether an engineer's working copy of a
+// committed file matches the repository's tracked/default branch. Only
+// meaningful when the artifact scope is REPO_COMMITTED; other scopes have no
+// baseline and carry no deviation state.
+enum HarnessDeviationState {
+ // HARNESS_DEVIATION_STATE_UNSPECIFIED means no deviation state applies or
+ // was computed (non-committed scopes).
+ HARNESS_DEVIATION_STATE_UNSPECIFIED = 0;
+ // HARNESS_DEVIATION_STATE_SYNCED means the working copy matches the
+ // repository's tracked/default branch.
+ HARNESS_DEVIATION_STATE_SYNCED = 1;
+ // HARNESS_DEVIATION_STATE_DEVIATED means the working copy differs from the
+ // repository's tracked/default branch.
+ HARNESS_DEVIATION_STATE_DEVIATED = 2;
+}
+
+// HarnessOperationalState is how the primitive is activated on the engineer's
+// machine. ENABLED/DISABLED is all the collector observes today; the enum
+// leaves room for richer application modes some tools expose (e.g. Cursor
+// rules: manual / auto / always) without a bool-to-enum migration later.
+enum HarnessOperationalState {
+ // HARNESS_OPERATIONAL_STATE_UNSPECIFIED means the state was not populated.
+ // Treat as a programming error.
+ HARNESS_OPERATIONAL_STATE_UNSPECIFIED = 0;
+ // HARNESS_OPERATIONAL_STATE_ENABLED means the primitive is active.
+ HARNESS_OPERATIONAL_STATE_ENABLED = 1;
+ // HARNESS_OPERATIONAL_STATE_DISABLED means the primitive is present but
+ // switched off.
+ HARNESS_OPERATIONAL_STATE_DISABLED = 2;
+}
+
+// HarnessUsageGranularity is the aggregation level of a reported usage record,
+// which fixes its dedup key and count semantics.
+enum HarnessUsageGranularity {
+ // HARNESS_USAGE_GRANULARITY_UNSPECIFIED means the granularity was not
+ // populated. Treat as a programming error.
+ HARNESS_USAGE_GRANULARITY_UNSPECIFIED = 0;
+ // HARNESS_USAGE_GRANULARITY_INVOCATION is one record per invocation event,
+ // deduped on (artifact, conversation, invocation timestamp); count is always 1.
+ HARNESS_USAGE_GRANULARITY_INVOCATION = 1;
+ // HARNESS_USAGE_GRANULARITY_CONVERSATION is one record per conversation,
+ // deduped on (artifact, conversation); count is the artifact's invocation
+ // total within that conversation.
+ HARNESS_USAGE_GRANULARITY_CONVERSATION = 2;
+}
+
+// HarnessUsageResolutionState is whether a usage record's inline artifact
+// identity has been matched to a stored harness_artifacts row (and its repo to
+// a vcs_repositories row). Ingest stores the identity verbatim and defers the
+// match, so a record starts PENDING and a later resolution pass flips it.
+enum HarnessUsageResolutionState {
+ // HARNESS_USAGE_RESOLUTION_STATE_UNSPECIFIED means the state was not
+ // populated. Treat as a programming error.
+ HARNESS_USAGE_RESOLUTION_STATE_UNSPECIFIED = 0;
+ // HARNESS_USAGE_RESOLUTION_STATE_PENDING means the record's artifact identity
+ // has not yet been matched to a stored artifact/repository.
+ HARNESS_USAGE_RESOLUTION_STATE_PENDING = 1;
+ // HARNESS_USAGE_RESOLUTION_STATE_RESOLVED means the record has been matched to
+ // its stored artifact (and repository, for repo scopes).
+ HARNESS_USAGE_RESOLUTION_STATE_RESOLVED = 2;
+}
+
+// HarnessTokenFidelity is how a token payload was derived. The number means
+// different things per source, and a consumer that cannot tell them apart would
+// present an estimate as a measurement — so the derivation travels with the
+// payload rather than being inferred from ide_type (which cannot distinguish a
+// vendor per-run total from a turn-level estimate).
+enum HarnessTokenFidelity {
+ // HARNESS_TOKEN_FIDELITY_UNSPECIFIED means the fidelity was not populated.
+ // Treat as a programming error.
+ HARNESS_TOKEN_FIDELITY_UNSPECIFIED = 0;
+ // HARNESS_TOKEN_FIDELITY_PER_CALL is summed from deduped per-response usage.
+ // An agent-file rollup is per-call-derived, so it carries this value — PER_RUN
+ // is reserved for a total only the vendor reports.
+ HARNESS_TOKEN_FIDELITY_PER_CALL = 1;
+ // HARNESS_TOKEN_FIDELITY_PER_RUN is a vendor-reported single total for a whole
+ // run, with no per-call decomposition available.
+ HARNESS_TOKEN_FIDELITY_PER_RUN = 2;
+ // HARNESS_TOKEN_FIDELITY_TURN_ESTIMATE is a turn-bracket delta credited to the
+ // invoking component — an estimate, not a measurement. The grain varies by
+ // source: Codex splits a turn's token bracket across the skills that turn
+ // mentioned, while Kiro estimates a whole-transcript, re-send-aware
+ // input+output payload for one agent firing (its data exposes no vendor count).
+ // Both are estimates and must never render as measured.
+ HARNESS_TOKEN_FIDELITY_TURN_ESTIMATE = 3;
+ // HARNESS_TOKEN_FIDELITY_NOT_ATTRIBUTABLE means attribution ran for this
+ // firing and found NOTHING to attribute: a known zero, not a missing
+ // measurement, and all buckets MUST be zero.
+ //
+ // It is also the only way a client can RETRACT a payload. An absent `tokens`
+ // message is indistinguishable from a pre-token client's omission, which the
+ // server must treat as a no-op — so without an explicit known-zero a
+ // correction that REMOVES attribution could never land, and the stale value
+ // would survive until retention. Carrying it as a fidelity rather than a
+ // separate `cleared` flag keeps it on the axis it belongs to: fidelity answers
+ // "how was this number derived", and "derived as: nothing attaches here" is an
+ // answer to that question.
+ //
+ // Emitted only by a source that actually computes attribution. A source that
+ // captures no tokens at all leaves the column NULL, which stays honestly
+ // UNKNOWN rather than claiming a known zero.
+ HARNESS_TOKEN_FIDELITY_NOT_ATTRIBUTABLE = 4;
+ // HARNESS_TOKEN_FIDELITY_CONTEXT_FOOTPRINT is input-side load: the tokens an
+ // artefact's own text adds to the prompt because it is loaded (not the tokens
+ // spent running it) — a skills-index entry, an invoked skill body, a subagent
+ // definition. Re-sent per turn, so it is real billed input, but it is a LOAD
+ // cost, never execution — aggregates MUST never add it into an execution total.
+ HARNESS_TOKEN_FIDELITY_CONTEXT_FOOTPRINT = 5;
+}
+
+// HarnessSourceSurface names which program of one tool produced a row. ide_type
+// names the tool; a tool can expose more than one source under it (Cursor's CLI
+// vs its IDE), and a per-day load row has no conversation id to keep those
+// sources apart the way a per-conversation row would. Stored as a name string
+// in a text column rather than in a payload, so it is in this file's gen_sql
+// list (a column-stored enum needs its Scanner/Valuer).
+enum HarnessSourceSurface {
+ // HARNESS_SOURCE_SURFACE_UNSPECIFIED means the surface was not populated.
+ HARNESS_SOURCE_SURFACE_UNSPECIFIED = 0;
+ // HARNESS_SOURCE_SURFACE_CLI is the tool's command-line program (e.g.
+ // cursor-agent reading ~/.cursor/chats/.../store.db).
+ HARNESS_SOURCE_SURFACE_CLI = 1;
+ // HARNESS_SOURCE_SURFACE_IDE is the tool's desktop/IDE program (e.g. Cursor
+ // reading globalStorage/state.vscdb).
+ HARNESS_SOURCE_SURFACE_IDE = 2;
+}
+
+// HarnessLoadComponent distinguishes a skill's two loads, which enter the
+// prompt at different times and would otherwise collide on the load row's
+// identity. Stored as a name string in a text column rather than in a payload,
+// so it is in this file's gen_sql list.
+enum HarnessLoadComponent {
+ // HARNESS_LOAD_COMPONENT_UNSPECIFIED means the component was not populated.
+ HARNESS_LOAD_COMPONENT_UNSPECIFIED = 0;
+ // HARNESS_LOAD_COMPONENT_DEFINITION is the always-present part: a skill's
+ // index entry, or a subagent's whole definition. Named DEFINITION rather than
+ // INDEX because a subagent has only one load and is indexed nowhere.
+ HARNESS_LOAD_COMPONENT_DEFINITION = 1;
+ // HARNESS_LOAD_COMPONENT_BODY is a skill's SKILL.md body, in context from the
+ // invoking turn onward. Still load — text re-sent every turn — never the cost
+ // of running the skill.
+ HARNESS_LOAD_COMPONENT_BODY = 2;
+}
+
+// HarnessLoadCostTier records how a load row's per-artefact cost was derived.
+// It rides inside the load payload rather than its own column, so it is
+// deliberately NOT in this file's gen_sql list (no Scanner/Valuer needed).
+enum HarnessLoadCostTier {
+ // HARNESS_LOAD_COST_TIER_UNSPECIFIED means the tier was not populated.
+ HARNESS_LOAD_COST_TIER_UNSPECIFIED = 0;
+ // HARNESS_LOAD_COST_TIER_VENDOR_REPORTED is the vendor's own per-artefact
+ // number, taken verbatim from a usage-tree node.
+ HARNESS_LOAD_COST_TIER_VENDOR_REPORTED = 1;
+ // HARNESS_LOAD_COST_TIER_ESTIMATED is our tokenisation of the definition
+ // text, held to the per-artefact band. There is deliberately no
+ // third value: "tier 3" means no catalogue entry and therefore NO ROW, so a
+ // stored tier for it would be unreachable — its absence is disclosed, not
+ // stored.
+ HARNESS_LOAD_COST_TIER_ESTIMATED = 2;
+}
+
+// HarnessLoadSetProvenance records whether the loaded artefact set was observed
+// or inferred. It rides inside the load payload rather than its own column, so
+// it is NOT in this file's gen_sql list.
+enum HarnessLoadSetProvenance {
+ // HARNESS_LOAD_SET_PROVENANCE_UNSPECIFIED means the provenance was not
+ // populated.
+ HARNESS_LOAD_SET_PROVENANCE_UNSPECIFIED = 0;
+ // HARNESS_LOAD_SET_PROVENANCE_OBSERVED means the store named the loaded
+ // artefacts.
+ HARNESS_LOAD_SET_PROVENANCE_OBSERVED = 1;
+ // HARNESS_LOAD_SET_PROVENANCE_INFERRED means the set came from the on-disk
+ // inventory and passed the corroboration guard. A guard rejection emits no
+ // row, so it needs no value here.
+ HARNESS_LOAD_SET_PROVENANCE_INFERRED = 2;
+}
+
+// HarnessEnforcementStatus is an enforced artifact's per-engineer computed
+// status (design: harness-control-plane-control), derived at read time from the
+// enforcement set joined against the engineer's own Observe-reported state —
+// never stored.
+enum HarnessEnforcementStatus {
+ // HARNESS_ENFORCEMENT_STATUS_UNSPECIFIED means the status was not
+ // populated. Treat as a programming error.
+ HARNESS_ENFORCEMENT_STATUS_UNSPECIFIED = 0;
+ // HARNESS_ENFORCEMENT_STATUS_INSTALLED means the engineer's own Observe
+ // sync reports the enforced content as their working copy.
+ HARNESS_ENFORCEMENT_STATUS_INSTALLED = 1;
+ // HARNESS_ENFORCEMENT_STATUS_PENDING means the engineer is targeted and
+ // eligible but has not yet converged (device offline, or between cycles).
+ HARNESS_ENFORCEMENT_STATUS_PENDING = 2;
+ reserved 3;
+ // HARNESS_ENFORCEMENT_STATUS_EXCLUDED means the engineer has no completed
+ // harness sync, so no device is known to be running the collector.
+ HARNESS_ENFORCEMENT_STATUS_EXCLUDED = 4;
+ // HARNESS_ENFORCEMENT_STATUS_REMOVAL_PENDING means the artifact was un-enforced
+ // for this engineer but their own Observe sync still reports the file present —
+ // the machine has not yet converged the removal. Used for the Observe-validated
+ // removal of prompt templates.
+ HARNESS_ENFORCEMENT_STATUS_REMOVAL_PENDING = 5;
+ // HARNESS_ENFORCEMENT_STATUS_REMOVED means the artifact was un-enforced for this
+ // engineer and their Observe sync no longer reports the file — the removal has
+ // converged on the machine.
+ HARNESS_ENFORCEMENT_STATUS_REMOVED = 6;
+ // HARNESS_ENFORCEMENT_STATUS_EXPIRED means the definition's enforcement window
+ // (enforce_until) has closed: devices that honor expiry no longer converge it,
+ // and the Observe join is not consulted — whether the file is still on the
+ // machine no longer matters to enforcement. Reported for every targeted
+ // engineer of an expired definition.
+ HARNESS_ENFORCEMENT_STATUS_EXPIRED = 7;
+}
+
+// HarnessArtifactSource is the grain of an observed harness artifact — a
+// per-engineer reading taken from a local machine, or the org-canonical copy
+// committed to a repository. It discriminates the two populations that share
+// the observed-artifact inventory: a VCS artifact is org/repo-grain and
+// person-less, a desktop artifact belongs to one engineer.
+enum HarnessArtifactSource {
+ // HARNESS_ARTIFACT_SOURCE_UNSPECIFIED is never a stored value; the proto3
+ // zero guards against an un-set discriminator reading as a real source.
+ HARNESS_ARTIFACT_SOURCE_UNSPECIFIED = 0;
+ // HARNESS_ARTIFACT_SOURCE_DESKTOP is read from an engineer's local machine by
+ // the desktop app (per-engineer).
+ HARNESS_ARTIFACT_SOURCE_DESKTOP = 1;
+ // HARNESS_ARTIFACT_SOURCE_VCS is the committed copy pulled from a tracked
+ // repository's default branch (org grain).
+ HARNESS_ARTIFACT_SOURCE_VCS = 2;
+}
+
+// HarnessEnforcementOrigin is which flow wrote an enforcement routing row: an
+// admin pushing an artifact at an audience (organisation policy), an engineer
+// enforcing one on their own machine (a personal choice), or the system's own
+// auto-enrolment. Stored on harness_enforced_artifacts.enforced_via so a reader can
+// tell organisation policy from an individual's choice — the target being the
+// author cannot, because an admin may push a policy at themselves and the two
+// flows share a natural key. When both flows land on one row the admin push wins.
+enum HarnessEnforcementOrigin {
+ // HARNESS_ENFORCEMENT_ORIGIN_UNSPECIFIED is never a stored value; the column
+ // defaults to ADMIN_PUSH when a writer states nothing.
+ HARNESS_ENFORCEMENT_ORIGIN_UNSPECIFIED = 0;
+ // HARNESS_ENFORCEMENT_ORIGIN_ADMIN_PUSH is an admin's push (UpsertEnforcedArtifact,
+ // InstallPromptTemplate): organisation policy.
+ HARNESS_ENFORCEMENT_ORIGIN_ADMIN_PUSH = 1;
+ // HARNESS_ENFORCEMENT_ORIGIN_SELF_SERVICE is an engineer's own enforcement on their
+ // own machine (SelfEnforceArtifact): a personal choice, not organisation policy.
+ HARNESS_ENFORCEMENT_ORIGIN_SELF_SERVICE = 2;
+ // HARNESS_ENFORCEMENT_ORIGIN_SYSTEM is the system's own auto-enrolment (the Cursor
+ // token-capture hook), written by no person.
+ HARNESS_ENFORCEMENT_ORIGIN_SYSTEM = 3;
+}

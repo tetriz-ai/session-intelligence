@@ -1,0 +1,32 @@
+// Copyright 2026 Workloom Solutions Private Limited
+// SPDX-License-Identifier: MIT
+
+
+syntax = "proto3";
+
+package sessionintelligence.common.v1;
+
+option go_package = "github.com/tetriz-ai/session-intelligence/gen/sessionintelligence/common/v1;commonv1";
+
+// IdeType identifies the AI coding tool a record belongs to. Canonical shared
+// definition, consumable on both sides of the serving layer/internal boundary
+// (first consumer: the harness protos). Two older per-layer copies exist
+// (the engine, serving layer analytics) and are superseded by this one
+// for new consumers; values stay numerically aligned across all three.
+enum IdeType {
+ // IDE_TYPE_UNSPECIFIED means the producer did not report the tool. Treat as
+ // a programming error — every capture carries an explicit tool.
+ IDE_TYPE_UNSPECIFIED = 0;
+ // IDE_TYPE_CLAUDE_CODE is Anthropic's Claude Code.
+ IDE_TYPE_CLAUDE_CODE = 1;
+ // IDE_TYPE_CURSOR is the Cursor IDE.
+ IDE_TYPE_CURSOR = 2;
+ // IDE_TYPE_COPILOT is GitHub Copilot.
+ IDE_TYPE_COPILOT = 3;
+ // IDE_TYPE_ANTIGRAVITY is Google's Antigravity IDE.
+ IDE_TYPE_ANTIGRAVITY = 4;
+ // IDE_TYPE_CODEX is OpenAI's Codex.
+ IDE_TYPE_CODEX = 5;
+ // IDE_TYPE_KIRO is AWS Kiro.
+ IDE_TYPE_KIRO = 6;
+}

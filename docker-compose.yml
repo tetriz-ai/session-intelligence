@@ -1,0 +1,46 @@
+# Local stack for the session-intelligence engine's real-LLM end-to-end run:
+# Postgres (with the session/security schema loaded) plus the bundled reference
+# reference-llm LLM service. The engine itself runs from the Go test/host process
+# against these two services. See scripts/e2e-real.sh and the README.
+#
+# The provider key is passed through from the host environment (GEMINI_API_KEY);
+# it is never stored in this file or the image.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: session_intelligence
+    ports:
+      # Bind to loopback only: Postgres uses the default postgres/postgres login and must not be
+      # reachable from other hosts on the network.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # Loaded once on first init: the distilled session/security schema.
+      - ./migrations/latest.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d session_intelligence"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  reference-llm:
+    build: ./reference-llm
+    environment:
+      # The image defaults to ENVIRONMENT=prod (hardened: /docs hidden). This end-to-end
+      # harness overrides it to development so the run exercises the Gemini model the
+      # real-LLM E2E is validated against (gemini-2.5-flash, with fallback), not the
+      # production model pins.
+      ENVIRONMENT: "development"
+      # Provider key passed through from the host; empty unless the operator sets it.
+      LLM__GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      # PAIRS detector stays off unless a real model bundle is baked in.
+      ML_MODEL_INFERENCE__DETECTOR_ENABLED: "false"
+    ports:
+      # Bind to loopback only: reference-llm is unauthenticated and holds the operator's Gemini key,
+      # so it must not be reachable from other hosts on the network.
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy

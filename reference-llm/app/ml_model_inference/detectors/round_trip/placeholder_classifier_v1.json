@@ -1,0 +1,31 @@
+{
+  "_comment": "PLACEHOLDER round-trip classifier v1 — NOT a corpus-fitted model. The labelled P/A/Q pair corpus does not exist yet; materializing it, fitting a class-balanced StandardScaler+LogisticRegression, and freezing the threshold is the productionization step gated behind the publication guard. Until then this transparent linear head over the RAW 19 features (scaler_mean=0 / scaler_scale=1) surfaces sensible scores with the reference design's signs — the detector MACHINERY ships, its accuracy does not. Do not treat these coefficients as a fitted operating point.",
+  "placeholder": true,
+  "version": "v1",
+  "feature_names": [
+    "cos_P_resp",
+    "cos_Q_P",
+    "cos_Q_prior",
+    "cos_Q_resp",
+    "cos_Q_resp_minus_Q_P",
+    "ends_q",
+    "has_prior",
+    "jac_Q_P",
+    "jac_Q_prior",
+    "jac_Q_resp",
+    "len_P",
+    "len_Q",
+    "len_resp",
+    "log_len_Q",
+    "n_q_marks",
+    "nli_contradiction",
+    "nli_entailment",
+    "regex_hit",
+    "resp_empty"
+  ],
+  "scaler_mean": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+  "scaler_scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+  "coef": [0.0, 0.0, 0.0, 0.0, 2.0, 0.3, 0.0, 0.0, 0.8, -1.2, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, -2.0, 1.2, -2.0],
+  "intercept": -1.0,
+  "threshold": 0.4
+}

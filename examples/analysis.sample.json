@@ -1,0 +1,124 @@
+{
+  "session_id": "sample-session",
+  "ide_type": "CLAUDE_CODE",
+  "disposition": "PRODUCED",
+  "verdict": {
+    "underlying_goal": "Configure and wire payments client to provider API using environment secrets and preserved backoff retries.",
+    "goal_is_coding_work": true,
+    "work_type": "CREATION",
+    "session_steering": "MOSTLY_ACTIVE",
+    "goal_achieved": "SOMEWHAT",
+    "smoothness": "ROUGH",
+    "friction_cause": "PROMPT",
+    "speed": "UNKNOWN",
+    "token_efficiency": "UNKNOWN",
+    "score_overall": 3,
+    "score_clarity": 4,
+    "score_specificity": 4,
+    "score_context_provision": 3,
+    "score_actionability": 5,
+    "score_completeness": 3,
+    "score_efficiency": 4
+  },
+  "measured": {
+    "total_prompts": 3,
+    "turn_count": 6,
+    "human_turn_count": 3,
+    "delegated_turns": 0,
+    "phase_count": 1,
+    "tool_call_count": 0,
+    "total_tokens": 16280,
+    "wasted_tokens": null,
+    "estimated_cost_usd": 0.0726,
+    "duration_seconds": 0
+  },
+  "turns": [
+    {
+      "prompt_index": 0,
+      "phase_ordinal": 0,
+      "prompt_type": "CREATION",
+      "user_steering": "ACTIVE",
+      "prompt_completeness": "MISSING_INFO",
+      "prompt_objective_met": "PARTIALLY_MET",
+      "agent_helpfulness": "HELPFUL",
+      "agent_initiative": "ASKED_TO_CONFIRM",
+      "tool_use": "APPROPRIATE",
+      "failure_class": "",
+      "waste_cause": "NONE",
+      "downstream_impact": "",
+      "round_trip_fault": "",
+      "security_issues": []
+    },
+    {
+      "prompt_index": 1,
+      "phase_ordinal": 0,
+      "prompt_type": "CONTEXT_ENRICHMENT",
+      "user_steering": "ACTIVE",
+      "prompt_completeness": "AMBIGUOUS",
+      "prompt_objective_met": "PARTIALLY_MET",
+      "agent_helpfulness": "PARTIALLY_HELPFUL",
+      "agent_initiative": "ASSUMED_AND_PROCEEDED",
+      "tool_use": "APPROPRIATE",
+      "failure_class": "",
+      "waste_cause": "NONE",
+      "downstream_impact": "CORRECTED",
+      "round_trip_fault": "",
+      "security_issues": [
+        {
+          "type": "api-key-leak",
+          "severity": "CRITICAL",
+          "note": "Live API key pasted directly into prompt."
+        }
+      ]
+    },
+    {
+      "prompt_index": 2,
+      "phase_ordinal": 0,
+      "prompt_type": "CREATION",
+      "user_steering": "CORRECTING",
+      "prompt_completeness": "COMPLETE",
+      "prompt_objective_met": "MET",
+      "agent_helpfulness": "HELPFUL",
+      "agent_initiative": "FOLLOWED_SPEC",
+      "tool_use": "APPROPRIATE",
+      "failure_class": "",
+      "waste_cause": "NONE",
+      "downstream_impact": "",
+      "round_trip_fault": "",
+      "security_issues": null
+    }
+  ],
+  "phases": [
+    {
+      "ordinal": 0,
+      "range_start": 0,
+      "range_end": 2,
+      "theme": "CREATION",
+      "task_complexity": "MODERATE",
+      "user_steering": "ACTIVE",
+      "objective": "Implement provider client integration for payments with proper configuration and retries.",
+      "objective_met": "PARTIALLY_MET",
+      "smoothness": "ROUGH",
+      "friction_cause": "PROMPT",
+      "speed": "UNKNOWN",
+      "went_well": [
+        "Agent asked clarifying questions in turn 0 when info was missing",
+        "Agent correctly resolved all requested fixes in turn 2"
+      ],
+      "went_wrong": [
+        "Prompt 1 leaked live API credentials directly in chat",
+        "Agent hardcoded credentials and broke existing backoff logic in turn 1",
+        "Required user correction round-trip to restore retries and move secrets to environment"
+      ]
+    }
+  ],
+  "security_flags": [
+    {
+      "type": "api-key-leak",
+      "severity": "critical",
+      "occurrences": [
+        "Live API key pasted directly into prompt."
+      ]
+    }
+  ]
+}

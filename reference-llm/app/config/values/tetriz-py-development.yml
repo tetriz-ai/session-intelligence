@@ -1,0 +1,25 @@
+server:
+  WORKERS: 1
+  LOG_LEVEL: "info"
+
+llm:
+  GEMINI_API_KEY: ""
+  # Gemini model fallback (features.GEMINI_MODEL_FALLBACK_ENABLED): 2.5 primary, 3.5
+  # fallback — mirrors deploy/prod so local calls run on 2.5-flash. See gemini_fallback.py.
+  GEMINI_PRIMARY_MODEL: "gemini-2.5-flash"
+  GEMINI_FALLBACK_MODEL: "gemini-3.5-flash"
+
+features:
+  ANALYZE_PROMPT_VALIDATION: true
+
+  # 2.5→3.5 Gemini model fallback on availability failures — mirrors deploy/prod so local
+  # calls go through 2.5-flash primary. See gemini_fallback.py.
+  GEMINI_MODEL_FALLBACK_ENABLED: true
+
+# Local dev defaults for self-hosted Langfuse.
+# These keys are NOT secrets — they are the built-in defaults of the local stack.
+langfuse:
+  ENABLED: false
+  PUBLIC_KEY: "pk-lf-local"
+  SECRET_KEY: "sk-lf-local"
+  HOST: "http://localhost:3010"

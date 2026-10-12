@@ -1,0 +1,48 @@
+{
+  "ideType": "IDE_TYPE_CLAUDE_CODE",
+  "sessionId": "sample-session",
+  "projectName": "acme-api",
+  "prompts": [
+    {
+      "role": "ROLE_USER",
+      "content": "Add a retry with exponential backoff to the HTTP client.",
+      "timestamp": "2026-03-01T12:00:00Z"
+    },
+    {
+      "role": "ROLE_ASSISTANT",
+      "content": "Added exponential backoff retry to client.go.",
+      "timestamp": "2026-03-01T12:00:00Z",
+      "metadata": {
+        "model": "claude-sonnet-4-5",
+        "inputTokens": "8200",
+        "outputTokens": "950",
+        "linesAdded": 34,
+        "linesRemoved": 6,
+        "filesEdited": [
+          "client.go"
+        ]
+      }
+    },
+    {
+      "role": "ROLE_USER",
+      "content": "Now add a unit test for the retry path.",
+      "timestamp": "2026-03-01T12:00:00Z"
+    },
+    {
+      "role": "ROLE_ASSISTANT",
+      "content": "Added client_retry_test.go covering success-after-retry, exhausted-retries and context-cancel.",
+      "timestamp": "2026-03-01T12:00:00Z",
+      "metadata": {
+        "model": "claude-sonnet-4-5",
+        "inputTokens": "9100",
+        "outputTokens": "1200",
+        "linesAdded": 58,
+        "linesRemoved": 2,
+        "filesEdited": [
+          "client_retry_test.go"
+        ]
+      }
+    }
+  ],
+  "conversationStartedAt": "2026-03-01T12:00:00Z"
+}

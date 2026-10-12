@@ -1,0 +1,1305 @@
+// Copyright 2026 Workloom Solutions Private Limited
+// SPDX-License-Identifier: MIT
+
+syntax = "proto3";
+
+package sessionintelligence.v1;
+
+option go_package = "github.com/tetriz-ai/session-intelligence/gen/sessionintelligence/v1;sessionintelligencepb";
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+
+// IdeType identifies the AI coding agent that produced a conversation.
+// This is the backend-internal enum — the serving layer has its own
+// presentation-layer copy that may group or hide values from the UI.
+// Superseded by sessionintelligence.common.v1.IdeType for new consumers — new
+// protos must import that one; values stay numerically aligned across all
+// copies.
+enum IdeType {
+ IDE_TYPE_UNSPECIFIED = 0;
+ IDE_TYPE_CLAUDE_CODE = 1;
+ IDE_TYPE_CURSOR = 2;
+ IDE_TYPE_COPILOT = 3;
+ IDE_TYPE_ANTIGRAVITY = 4;
+ IDE_TYPE_CODEX = 5;
+ IDE_TYPE_KIRO = 6;
+}
+
+// ─── S3 Conversation Content Contract ───────────────────────
+//
+// Defines the structure of the JSONL content uploaded to S3 by the
+// desktop app. Both the desktop app (producer) and the session processor
+// (consumer) use this as the shared contract.
+//
+// S3 key: <org_id>/<person_id>/<started_at>_<client_id>.jsonl
+// Each S3 object contains one Conversation serialized as JSON.
+
+// A single conversation session extracted from an IDE.
+//
+// This is also the public input to the single-session front door (the Go `analyze` package):
+// `analyze.ParseConversation` decodes one of these from its protojson form (a single JSON object,
+// not line-delimited) and `analyze.AnalyzeSession` analyses it. A minimal input is `ide_type` plus an
+// ordered `prompts` list (each a `role`, `content`, and optional `metadata`); `session_events` and
+// the other fields are optional.
+message Conversation {
+ // Which IDE this conversation was extracted from.
+ IdeType ide_type = 1;
+
+ // Unique session identifier from the IDE.
+ // Claude Code: filename stem (UUID). Cursor: composerId.
+ string session_id = 2;
+
+ // Project or repo name (e.g., "acme-api").
+ // The desktop app strips the full path — only the leaf directory name is sent.
+ string project_name = 3;
+
+ // Ordered list of prompts in this conversation.
+ repeated Prompt prompts = 4;
+
+ // When this conversation started.
+ // Priority: earliest prompt timestamp → IDE-reported session creation time → local DB row creation time.
+ // Used by the backend processor for conversation_start_date. Decouples dating from S3 key parsing.
+ google.protobuf.Timestamp conversation_started_at = 5;
+
+ // When this conversation was last updated.
+ // Claude Code: file mtime. Cursor: composerData.lastUpdatedAt.
+ // Used as fetched_at in raw_records.
+ google.protobuf.Timestamp last_updated_at = 6;
+
+ // Per-session metadata from local IDE files (optional — populated by desktop app).
+ SessionMeta session_meta = 7;
+
+ // Pre-computed session quality from Claude Code insights (optional — only when CC ran insights).
+ SessionFacets session_facets = 8;
+
+ // Per-upload installation metadata (optional — plan tier, device info).
+ InstallationMetadata installation_metadata = 9;
+
+ // AI code attribution metrics (optional — Cursor only in v1).
+ AiAttribution ai_attribution = 10;
+
+ // Aggregate Claude Code usage stats snapshot (optional — uploaded once daily).
+ StatsCacheSnapshot stats_cache = 11;
+
+ // Ordered, normalized timeline of what happened in this session — the input
+ // loop detection reads. Additive to `prompts`, which stays the only authority
+ // for message text: a PROMPT_REFERENCE event locates a prompt by ordinal
+ // rather than duplicating it. Empty from adapters that do not emit events,
+ // which `event_coverage` reports honestly.
+ repeated SessionEvent session_events = 12;
+
+ // How completely session_events represents the source artifact. Governs which
+ // observed-rate denominators this session may enter; it is never read as proof
+ // that no loop occurred.
+ EventCoverage event_coverage = 13;
+
+ // extractor_version is the monotonic desktop extractor version, stamped per
+ // upload. Distinguishes "the signal is absent" from "the extractor predates
+ // reporting the signal" via a >= compare; the vendor version fields describe
+ // the IDE, not the extractor. This is our own extractor's version, not the
+ // desktop app's semantic release (app_version). Unset on an upload from a
+ // desktop predating this field, distinguishable from a reported 0.
+ optional int32 extractor_version = 14;
+}
+
+// ─── Normalized session event timeline (loop engineering design) ─────
+
+// SessionEventKind is the normalized class of one timeline event.
+enum SessionEventKind {
+ // SESSION_EVENT_KIND_UNSPECIFIED means the adapter did not classify the event;
+ // loop detection ignores it rather than guessing a class.
+ SESSION_EVENT_KIND_UNSPECIFIED = 0;
+ // SESSION_EVENT_KIND_PROMPT_REFERENCE locates a message in `prompts` by
+ // ordinal instead of copying its text.
+ SESSION_EVENT_KIND_PROMPT_REFERENCE = 1;
+ // SESSION_EVENT_KIND_TOOL_CALL means a tool was invoked. Its outcome is not yet
+ // known here; the paired result carries it.
+ SESSION_EVENT_KIND_TOOL_CALL = 2;
+ // SESSION_EVENT_KIND_TOOL_RESULT means a tool returned. This is the event class
+ // that can prove a check ran and whether it passed.
+ SESSION_EVENT_KIND_TOOL_RESULT = 3;
+ // SESSION_EVENT_KIND_SKILL_CALL means a named skill was invoked; a loop-capable
+ // skill makes a run's candidate mandatory.
+ SESSION_EVENT_KIND_SKILL_CALL = 4;
+ // SESSION_EVENT_KIND_HOOK_CALL means a hook fired. A hook is machine-initiated,
+ // so it attributes a run to automation rather than to the operator.
+ SESSION_EVENT_KIND_HOOK_CALL = 5;
+ // SESSION_EVENT_KIND_COMMAND means a slash command was invoked; the command name
+ // is what declares a loop.
+ SESSION_EVENT_KIND_COMMAND = 6;
+ // SESSION_EVENT_KIND_GOAL means a goal was declared — an explicit objective a run
+ // can be measured against.
+ SESSION_EVENT_KIND_GOAL = 7;
+ // SESSION_EVENT_KIND_API_RETRY means the provider logged a retried API
+ // request inside a turn — a friction signal, never a new turn.
+ SESSION_EVENT_KIND_API_RETRY = 8;
+ // SESSION_EVENT_KIND_COMPACTION means the context window was compacted at
+ // this timeline position, so the compaction can be placed inside the turn
+ // it happened in rather than only counted per session.
+ SESSION_EVENT_KIND_COMPACTION = 9;
+ // SESSION_EVENT_KIND_TURN_STARTED means the provider natively brackets
+ // turns and this is an opening edge. Distinct from the closing kind because
+ // a single boundary kind cannot tell an opening from a closing edge, and
+ // alternation misreads every bracket after a cancelled or truncated one.
+ SESSION_EVENT_KIND_TURN_STARTED = 10;
+ // SESSION_EVENT_KIND_TURN_COMPLETED means a provider-native turn closed. A
+ // started bracket may have no completion (a cancelled or truncated turn).
+ SESSION_EVENT_KIND_TURN_COMPLETED = 11;
+ // SESSION_EVENT_KIND_SUBAGENT_STARTED means an inline sub-agent span opened
+ // at this position. Matching edges share the child's id in call_id and the
+ // sub-agent name in operation_name, so concurrent spans stay distinguishable.
+ SESSION_EVENT_KIND_SUBAGENT_STARTED = 12;
+ // SESSION_EVENT_KIND_SUBAGENT_COMPLETED means an inline sub-agent span
+ // closed. A span with no completion edge ends with its enclosing turn.
+ SESSION_EVENT_KIND_SUBAGENT_COMPLETED = 13;
+}
+
+// SessionEventOutcome is the observed completion state of an event.
+enum SessionEventOutcome {
+ // SESSION_EVENT_OUTCOME_UNSPECIFIED means the field was never set. Distinct from
+ // UNKNOWN, which is an adapter's positive statement that it cannot observe.
+ SESSION_EVENT_OUTCOME_UNSPECIFIED = 0;
+ // SESSION_EVENT_OUTCOME_SUCCEEDED means the event completed without reported
+ // failure — a check carrying this is a passing check.
+ SESSION_EVENT_OUTCOME_SUCCEEDED = 1;
+ // SESSION_EVENT_OUTCOME_FAILED means the event reported failure. This is the
+ // signal that a correction is warranted, so a free-form run needs it.
+ SESSION_EVENT_OUTCOME_FAILED = 2;
+ // SESSION_EVENT_OUTCOME_CANCELLED means the event was abandoned before it could
+ // report — never counted as either a pass or a failure.
+ SESSION_EVENT_OUTCOME_CANCELLED = 3;
+ // SESSION_EVENT_OUTCOME_UNKNOWN is for events whose completion the adapter
+ // cannot observe — distinct from UNSPECIFIED, which means the field was never
+ // set.
+ SESSION_EVENT_OUTCOME_UNKNOWN = 4;
+}
+
+// EventCoverage rates how completely an adapter can represent a source
+// artifact's event classes. Source- and version-specific.
+enum EventCoverage {
+ // EVENT_COVERAGE_UNSPECIFIED is read as NONE, so an old client that sends no
+ // coverage is excluded from observed rates rather than counted as a
+ // loop-free session.
+ EVENT_COVERAGE_UNSPECIFIED = 0;
+ // EVENT_COVERAGE_COMPLETE means the adapter observes every event class needed
+ // to prove both explicit and free-form loops for this artifact.
+ EVENT_COVERAGE_COMPLETE = 1;
+ // EVENT_COVERAGE_PARTIAL means some event classes or outcomes are absent.
+ EVENT_COVERAGE_PARTIAL = 2;
+ // EVENT_COVERAGE_NONE covers legacy and unsupported artifacts.
+ EVENT_COVERAGE_NONE = 3;
+}
+
+// SessionEventAuthor names who produced one turn of the timeline.
+//
+// It collapses (Prompt.role, PromptMetadata.is_sub_agent) into the one question every
+// reader of the timeline actually asks — was this a person? — so the answer travels on
+// the event instead of having to be reconstructed from a parallel list.
+//
+// Three values rather than a boolean, because "not a person" splits into two readings a
+// human-vs-machine flag cannot carry: an assistant's own turn, and a delegated agent's
+// turn that a surface folded into its parent transcript as a user turn. A measure of
+// human interaction excludes the second; a measure of what the run was ASKED to do
+// includes it, because an orchestrator's task prompt is a real instruction.
+enum SessionEventAuthor {
+ // The producer did not record an author. Read as NOT human — never as human — so a
+ // source that omits the role loses autonomy credit for nothing rather than having
+ // every one of its runs deleted as human-steered. Every event uploaded before this
+ // field existed carries this value on the wire.
+ SESSION_EVENT_AUTHOR_UNSPECIFIED = 0;
+ // A person typed this turn. The only value that disqualifies a run's autonomy.
+ SESSION_EVENT_AUTHOR_HUMAN = 1;
+ // The session's own agent produced this turn.
+ SESSION_EVENT_AUTHOR_AGENT = 2;
+ // A delegated agent produced this turn, and the surface folded it into the parent
+ // transcript as a user turn instead of emitting a child session (Kiro). Machine
+ // authorship wearing a person's role.
+ SESSION_EVENT_AUTHOR_DELEGATED_AGENT = 3;
+}
+
+// SessionEvent is one entry in the normalized session timeline. Adapters emit a
+// contiguous one-based `sequence` in source order; the backend re-validates and
+// re-redacts every field before persisting anything derived from it.
+message SessionEvent {
+ // sequence is the one-based position in the source-normalized timeline.
+ int64 sequence = 1 [(buf.validate.field).int64.gt = 0];
+
+ // occurred_at is the source event time.
+ google.protobuf.Timestamp occurred_at = 2 [(buf.validate.field).required = true];
+
+ // kind identifies the normalized event class.
+ SessionEventKind kind = 3 [(buf.validate.field).enum = {
+ defined_only: true
+ not_in: [0]
+ }];
+
+ // operation_name is the bounded tool, command, skill, hook, or goal name.
+ string operation_name = 4 [(buf.validate.field).string.max_len = 256];
+
+ // call_id identifies one call within this session when the source supplies it.
+ string call_id = 5 [(buf.validate.field).string.max_len = 128];
+
+ // parent_call_id references an earlier containing call in this session,
+ // preserving tool nesting. Empty when the source does not express nesting.
+ string parent_call_id = 6 [(buf.validate.field).string.max_len = 128];
+
+ // outcome is the observed completion state. An event kind with no distinct
+ // completion state of its own — a prompt reference, a retry or compaction
+ // marker, an opening bracket edge — stamps SUCCEEDED: the event was
+ // observed to happen. UNKNOWN is reserved for a result whose completion
+ // state the source genuinely did not record.
+ SessionEventOutcome outcome = 7 [(buf.validate.field).enum = {
+ defined_only: true
+ not_in: [0]
+ }];
+
+ // redacted_summary is a bounded, already-redacted description of a non-message
+ // event. Always empty for PROMPT_REFERENCE, whose content is reached through
+ // prompt_ordinal instead.
+ string redacted_summary = 8 [(buf.validate.field).string.max_len = 200];
+
+ // prompt_ordinal is the one-based index into Conversation.prompts for
+ // PROMPT_REFERENCE, and zero for every other kind.
+ int32 prompt_ordinal = 9;
+
+ // author names who produced a PROMPT_REFERENCE's turn, and is zero for every other
+ // kind — a tool call, a hook, a command is identified by the kind itself.
+ //
+ // It exists because the autonomy bar turns on telling a person's turn from an agent's,
+ // and prompt_ordinal alone cannot say: the role lives on Prompt, so a reader of the
+ // timeline must dereference into a separate list to learn who spoke. A consumer that
+ // only ever sees events — the loop analyzer and the judge scoring it — therefore could
+ // not apply the bar at all. Stamping the author on the event is what makes the timeline
+ // answer the question by itself.
+ SessionEventAuthor author = 10 [(buf.validate.field).enum.defined_only = true];
+}
+
+// A single user↔assistant message in the conversation.
+message Prompt {
+ // Who sent this message.
+ Role role = 1;
+
+ // The text content of the message.
+ // For assistant messages, tool_use blocks are included as text.
+ // tool_result and thinking blocks are excluded.
+ string content = 2;
+
+ // When this message was sent (optional — not all IDEs provide timestamps).
+ google.protobuf.Timestamp timestamp = 3;
+
+ // Per-message metadata (token usage, model, etc.).
+ PromptMetadata metadata = 4;
+}
+
+// Per-message metadata. Fields are optional — availability depends on IDE.
+// TokenFidelity is the flat per-turn trust filter for a turn's token counts:
+// summing estimated tokens as measured is the failure it prevents.
+enum TokenFidelity {
+ // TOKEN_FIDELITY_UNSPECIFIED means fidelity unknown; a 0 here is not a
+ // measured 0.
+ TOKEN_FIDELITY_UNSPECIFIED = 0;
+ // TOKEN_FIDELITY_MEASURED means the token counts are vendor-measured.
+ TOKEN_FIDELITY_MEASURED = 1;
+ // TOKEN_FIDELITY_NATIVE_PARTIAL means natively reported but incomplete.
+ TOKEN_FIDELITY_NATIVE_PARTIAL = 2;
+ // TOKEN_FIDELITY_ESTIMATE means the counts are estimated, not measured.
+ TOKEN_FIDELITY_ESTIMATE = 3;
+}
+
+// SessionSurface is the normalized run surface a turn's session ran on — the grouper's
+// resolution of the raw, per-provider session_source value onto one shared vocabulary.
+// UNSPECIFIED is never emitted: an unreported or unrecognized surface resolves to no value at all,
+// so a consumer reads a known surface or nothing.
+enum SessionSurface {
+ // SESSION_SURFACE_UNSPECIFIED is the zero value; it is never persisted — an unreported surface
+ // is NULL, not UNSPECIFIED.
+ SESSION_SURFACE_UNSPECIFIED = 0;
+ // SESSION_SURFACE_CLI means a terminal/CLI session (Codex/Cursor/Kiro cli, Claude Code cli).
+ SESSION_SURFACE_CLI = 1;
+ // SESSION_SURFACE_IDE means an in-editor session (Codex vscode, Cursor IDE, Kiro ide, Claude
+ // Code claude-vscode).
+ SESSION_SURFACE_IDE = 2;
+ // SESSION_SURFACE_DESKTOP means a desktop-app session (Kiro desktop, Claude Code claude-desktop).
+ SESSION_SURFACE_DESKTOP = 3;
+ // SESSION_SURFACE_SDK means a headless/programmatic session (Codex exec, Claude Code sdk-*).
+ SESSION_SURFACE_SDK = 4;
+ // SESSION_SURFACE_COWORK means a Claude Code Cowork (agent-mode) session.
+ SESSION_SURFACE_COWORK = 5;
+ // SESSION_SURFACE_SUBAGENT means a delegation-origin session (Codex subagent) — kept as its own
+ // value rather than folded into a launch surface.
+ SESSION_SURFACE_SUBAGENT = 6;
+}
+
+// PromptAuthorship attests whose words a user-role message's text is — a person's,
+// or machine text a surface placed in the user role. It answers the question
+// SessionEventAuthor cannot for a prompts[]-only reader: that enum records who CAUSED
+// a turn and lives on the event timeline, while this rides on the message itself, so a
+// consumer reading only Conversation.prompts learns authorship without dereferencing
+// the timeline. Set on user-role messages; an assistant message leaves it UNSPECIFIED.
+// Per-IDE best-effort — a surface that cannot tell leaves it UNSPECIFIED rather than guess.
+enum PromptAuthorship {
+ // PROMPT_AUTHORSHIP_UNSPECIFIED means the producer could not attest authorship, and
+ // is read as NOT human: a consumer weighing a message as a person's own words must
+ // treat it like INJECTED, never as a positive human signal. Carried by every message
+ // from a surface with no authorship marker (Codex) and by every upload predating this
+ // field.
+ PROMPT_AUTHORSHIP_UNSPECIFIED = 0;
+ // PROMPT_AUTHORSHIP_HUMAN means a person typed these exact words.
+ PROMPT_AUTHORSHIP_HUMAN = 1;
+ // PROMPT_AUTHORSHIP_INJECTED means machine text wearing the user role — a skill or
+ // slash-command expansion, injected context, a caveat or system reminder, command
+ // output, or a delegated agent's turn folded into the parent transcript.
+ PROMPT_AUTHORSHIP_INJECTED = 2;
+}
+
+message PromptMetadata {
+ // LLM model used (e.g., "claude-sonnet-4-6", "gpt-4o").
+ // Claude Code: per-message. Cursor: conversation-wide (same for all messages).
+ string model = 1;
+
+ // Token counts for this message.
+ int64 input_tokens = 2;
+ int64 output_tokens = 3;
+
+ // Anthropic prompt caching token counts.
+ // cache_creation_input_tokens is the flat sum of 5m + 1h ephemeral writes
+ // (matches the top-level Anthropic API field). The split lives in fields
+ // 10/11 below — populated when the extractor reads the nested
+ // cache_creation.ephemeral_{5m,1h}_input_tokens object. The flat field is
+ // retained for backward-compat with older raw_records.
+ int64 cache_creation_input_tokens = 4;
+ int64 cache_read_input_tokens = 5;
+
+ // Context window utilization (0.0–1.0) after this message, from whatever
+ // signal the surface exposes (a native per-message figure, or a derived
+ // total-tokens ÷ model-window). Unset means the surface did not report it;
+ // a zero is a measured zero — consumers must not read absence as 0%.
+ // Producers must put measured zeros on the wire; extractors predating this
+ // contract dropped zero values, so on their payloads absence does not prove
+ // non-reporting — extractor_version dates which reading applies.
+ optional double context_usage_percent = 6;
+
+ // Whether the user attached an image in this message.
+ bool is_image_added = 7;
+
+ // Files referenced or attached in this message.
+ repeated string relevant_files = 8;
+
+ // Number of code blocks in assistant response.
+ int32 code_block_count = 9;
+
+ // cache_creation_5m_input_tokens is tokens written to Anthropic's 5-minute
+ // ephemeral prompt cache for this turn. Read from
+ // usage.cache_creation.ephemeral_5m_input_tokens. Unset on an upload from a
+ // desktop predating this split — distinguishable from a reported 0 — in which
+ // case only the legacy cache_creation_input_tokens (field 4) carries
+ // write-volume signal. Anthropic guarantees cache_creation_input_tokens == 5m + 1h.
+ optional int64 cache_creation_5m_input_tokens = 10;
+ // cache_creation_1h_input_tokens is tokens written to Anthropic's 1-hour
+ // ephemeral prompt cache. Read from
+ // usage.cache_creation.ephemeral_1h_input_tokens. Auto-used by Claude
+ // Code Max-tier sessions. Unset on an upload from a desktop predating this
+ // split — distinguishable from a reported 0; only the legacy
+ // cache_creation_input_tokens (field 4) carries signal on such an upload.
+ optional int64 cache_creation_1h_input_tokens = 11;
+
+ // message_id is the AI provider's stable identifier for the single billed
+ // response this line belongs to (Claude Code: message.id). Every transcript
+ // line of one billed response repeats this same id. Empty when the source
+ // exposes no stable per-response id, and on uploads that predate this field.
+ string message_id = 12;
+
+ // is_sub_agent marks a turn produced by a delegated agent rather than by the
+ // human and the session's main agent. True only where a surface folds a
+ // sub-agent's transcript into its parent conversation instead of emitting a
+ // separate session (Kiro, whose sub-executions never become their own
+ // session); surfaces that emit a child session leave it false and carry the
+ // relationship in SessionMeta lineage instead. Consumers that measure human
+ // interaction — prompt counts, response latency, the opening ask — must
+ // exclude these; consumers reading the work performed should include them.
+ bool is_sub_agent = 13;
+
+ // lines_added is the device-counted added-line total across this message's
+ // edit operations. Unset means no count was available for this message (an
+ // edit whose payload is uncountable on the device); a zero is a measured
+ // zero. Sibling of the session-grain SessionMeta.lines_added.
+ optional int32 lines_added = 14;
+ // lines_removed is the device-counted removed-line total across this
+ // message's edit operations. Same unset-vs-zero contract as lines_added.
+ optional int32 lines_removed = 15;
+ // files_edited is the set of file paths this message's edit operations
+ // wrote. relevant_files remains the referenced/read set — the two together
+ // let a consumer distinguish read from edited without re-deriving it.
+ repeated string files_edited = 16;
+ // native_billing_units is the provider's own billing unit consumed by the
+ // turn this message closes (Kiro: credits), stamped on the assistant
+ // message that carries the turn's usage. Unset means the surface did not
+ // report a native unit; never summable across providers.
+ optional double native_billing_units = 17;
+ // reasoning_tokens is the provider-reported reasoning bucket of
+ // output_tokens (Codex). An "of which" detail: always a subset of
+ // output_tokens, so cost and total math use output_tokens alone — adding
+ // this on top double-counts. Unset means the provider reported no split.
+ optional int64 reasoning_tokens = 18;
+
+ // token_fidelity is the trust tier of THIS message's token counts, stamped by
+ // the extractor. The turn grouper reduces the worst tier across a turn's
+ // token-bearing messages. UNSPECIFIED = a message with no token counts (a
+ // human prompt) — it does not participate in the turn's fidelity.
+ TokenFidelity token_fidelity = 19;
+
+ // authorship attests whose words this user-role message is — see PromptAuthorship for the
+ // value meanings. Set on user-role messages; UNSPECIFIED on assistant messages and on
+ // producers that cannot attest it (read as not-human).
+ PromptAuthorship authorship = 20;
+
+ // permission_mode is the HITL (human-in-the-loop) gate this turn ran under, captured verbatim
+ // from the source (Claude Code permissionMode; Codex turn_context.approval_policy). The producer
+ // stamps the mode active at the turn — Claude Code's inline value is sparse (only around mode
+ // changes), so the extractor forward-fills the last mode seen onto each user turn. Empty when the
+ // mode is not yet known (turns before the first observed mode; the backend forward-fills these)
+ // or for sources with no per-turn mode (Kiro, Cursor).
+ string permission_mode = 21;
+}
+
+// PRReference is a single PR the session touched — created, opened, or
+// discussed. A session can reference multiple PRs (e.g., split work, rebase
+// onto a new branch+PR, or a Claude session used for two tasks).
+// DIRECT_PR_REF attribution iterates every reference in
+// UsageMetadata.pr_references, falling back to the scalar pr_url / pr_number
+// / pr_repository fields on SessionMeta / UsageMetadata for older uploads.
+// SignalSource says how a piece of session evidence was obtained, so the
+// matcher can rank it rather than treating every value in a field alike.
+//
+// The distinction it encodes is whether the SESSION produced the value or the
+// workspace merely happened to hold it. A `gh pr create` receipt is the
+// session's own action; a PR URL scraped from a teammate's merge commit names a
+// PR precisely and says nothing about this session. Both arrive in
+// pr_references today and score identically, which is how one engineer's
+// sessions came to display three colleagues' PRs.
+//
+// Rank, strongest first: SESSION_COMMAND > VENDOR_FIELD > SESSION_PROSE >
+// LOCAL_GIT_WINDOWED > UNSPECIFIED — declaration order, with the zero value
+// last. That alignment is a convenience, not a rule the code may lean on:
+// proto additivity forces a new value to be APPENDED, so a source stronger than
+// a local-git read would land at the weak end. Give any new value an explicit
+// rank when you add it.
+enum SignalSource {
+ // Producer predates source stamping. Two standings, and they differ by role:
+ // as a SCOPE it is admissible (a branch carrying it still narrows a search),
+ // and as SUPPORT it never is, because absence cannot be told from an ambient
+ // scrape. Every stored row carries this until re-extraction.
+ SIGNAL_SOURCE_UNSPECIFIED = 0;
+ // A command the session ran, and whose output we captured — a `gh pr create`
+ // receipt, a successful `git push`.
+ SIGNAL_SOURCE_SESSION_COMMAND = 1;
+ // A field the IDE itself recorded against this message or session.
+ SIGNAL_SOURCE_VENDOR_FIELD = 2;
+ // The agent's own turn-final narration. Session-produced, but it can quote a
+ // PR the session merely read about, so a reference from prose is repo-gated.
+ SIGNAL_SOURCE_SESSION_PROSE = 3;
+ // Read from local git, bounded to the session's own time window. Found near
+ // the session rather than produced by it, so it may scope a search and may
+ // never support an attribution.
+ SIGNAL_SOURCE_LOCAL_GIT_WINDOWED = 4;
+}
+
+// BranchSignal is a branch the session was on, travelling with how it was
+// obtained so no downstream set, dedupe or sort can separate the two.
+//
+// A parallel array of sources was the alternative and is unreadable: the
+// matcher converts the branch list to a set before consulting anything, so
+// position never reaches the reader.
+message BranchSignal {
+ // Short branch name, as a PR's head_branch carries it — never
+ // "refs/heads/x", "origin/x", or a detached "HEAD".
+ string name = 1;
+ // How this branch was obtained. Absent on a producer that predates stamping.
+ SignalSource source = 2;
+}
+
+message PRReference {
+ string pr_url = 1;
+ int32 pr_number = 2;
+ string pr_repository = 3;
+ // How this reference was obtained. Governs whether it may attribute on its
+ // own: a session-produced reference may, an ambient one may only scope.
+ SignalSource source = 4;
+}
+
+// Per-session metadata collected from local IDE files.
+// Populated by the desktop app from Claude Code session JSON and Cursor SQLite.
+message SessionMeta {
+ // Programming languages detected in the session.
+ // CC sends a map of language → file count (e.g., {"Go": 6, "TypeScript": 2}).
+ // Cursor: not populated (derive from relevant_files extensions).
+ map<string, int32> languages = 1;
+
+ // Net lines added/removed across all file edits in the session.
+ int32 lines_added = 2;
+ int32 lines_removed = 3;
+
+ // Number of distinct files modified during the session.
+ int32 files_modified = 4;
+
+ // Git operations performed during the session.
+ int32 git_commits = 5;
+ int32 git_pushes = 6;
+
+ // Feature flags — whether the session used specific capabilities.
+ bool uses_mcp = 7;
+ bool uses_web_search = 8;
+ bool uses_web_fetch = 9;
+ bool uses_task_agent = 10;
+
+ // Number of times the user interrupted (cancelled) an assistant response.
+ int32 user_interruptions = 11;
+
+ // Tool invocation counts keyed by tool name (e.g., {"Bash": 17, "Read": 4}).
+ map<string, int32> tool_counts = 12;
+
+ // Total tool invocations that returned an error.
+ int32 tool_errors = 13;
+
+ // Error counts keyed by category (e.g., {"permission_denied": 2}).
+ map<string, int32> tool_error_categories = 14;
+
+ // Message counts by role.
+ int32 user_message_count = 15;
+ int32 assistant_message_count = 16;
+
+ // Wall-clock session duration in minutes (last_updated - start_time).
+ double duration_minutes = 17;
+
+ // Opening user message — the initial prompt that started the session.
+ string first_prompt = 18;
+
+ // Absolute path to the project directory on the user's machine.
+ // Stripped before storage in insights — only used for local context during extraction.
+ string project_path = 19;
+
+ // When the session started (from IDE metadata or earliest message timestamp).
+ google.protobuf.Timestamp start_time = 20;
+
+ // Number of context compactions (automatic + manual) during the session.
+ int32 compaction_count = 21;
+
+ // Subset of compaction_count triggered manually by the user.
+ int32 manual_compaction_count = 22;
+
+ // Average token count in the context window just before each compaction.
+ int32 avg_pre_compaction_tokens = 23;
+
+ // PR created during the session (if any). Extracted from git push output.
+ // Deprecated: use pr_references (field 56) which carries every PR the
+ // session touched. These scalars stay populated with the FIRST reference
+ // for readers that haven't been updated yet.
+ string pr_url = 24 [deprecated = true];
+ int32 pr_number = 25 [deprecated = true];
+ string pr_repository = 26 [deprecated = true];
+
+ // Human-readable session title (e.g., "Fix auth middleware").
+ string session_title = 27;
+
+ // Git branch the session was working on.
+ // Deprecated: prefer git_branches (field 57). Stays populated with the
+ // first non-trunk branch seen so pre-upgrade readers still work.
+ string git_branch = 28 [deprecated = true];
+
+ // Files tracked across message boundaries (from file-history-snapshot JSONL events).
+ // Accumulated unique file paths from trackedFileBackups across the session.
+ repeated string tracked_file_paths = 29;
+
+ // Most recent user prompt text (from last-prompt JSONL event).
+ string last_prompt = 30;
+
+ // Remote control session URL (from bridge_status JSONL event).
+ string bridge_session_url = 31;
+
+ // MCP server names configured in the IDE (e.g., ["slack", "github"]).
+ repeated string mcp_server_names = 32;
+
+ // Array of seconds between each assistant response and the next user message.
+ repeated double user_response_times = 33;
+
+ // ISO 8601 timestamps of all user messages in the session.
+ repeated string user_message_timestamps = 34;
+
+ // Hour-of-day (0-23) for each message in the session. Used as heatmap fallback.
+ repeated int32 message_hours = 35;
+
+ // Cursor 3+ per-project signals (unset = Cursor 2.x or directory absent).
+ int32 sub_agent_count = 36;
+ int32 agent_transcript_count = 37;
+ int32 tool_output_count = 38;
+ int32 terminal_session_count = 39;
+ repeated string project_mcp_server_names = 40;
+
+ // Cursor 3+ workspace sidebar metadata (per-conversation, unset = Cursor 2.x).
+ // Combined lines added + removed for the conversation.
+ int32 cursor_lines_changed = 41;
+ // Count of unique files the AI modified (from codeBlockData keys).
+ int32 cursor_files_modified = 42;
+ // Session-level context window utilization, as a raw 0–100 percentage from the Cursor
+ // sidebar (NOT a 0.0–1.0 fraction). The backend normalizes it to 0.0–1.0 before use.
+ double cursor_context_usage_percent = 43;
+
+ // CC session UUID — passed through from session-meta JSON.
+ // Redundant with Conversation.session_id but included to match the CC file format.
+ string session_id = 44;
+
+ // Per-session aggregate token counts from CC session-meta.
+ // Also derivable from per-prompt metadata but included for convenience.
+ int64 input_tokens = 45;
+ int64 output_tokens = 46;
+
+ // Surface attribution: "cli", "vscode", "desktop", "subagent", etc.
+ // Populated by Codex extractor from session_meta.source; used downstream to
+ // map Codex subagent sessions to delegation_level = "delegated".
+ string source = 47;
+
+ // Git commit SHA at the start of the session.
+ // Codex: session_meta.git.commit_hash / threads.git_sha.
+ // Copilot CLI: session.start.data.context.headCommit.
+ string git_sha = 48;
+
+ // Codex agent configuration (from threads table columns).
+ string reasoning_effort = 49;
+ string memory_mode = 50;
+ string approval_mode = 51;
+ string sandbox_policy = 52;
+
+ // Files modified by AI code patches (from patch_apply_end events).
+ repeated string files_edited = 53;
+
+ // Whether the session used extended/chain-of-thought reasoning.
+ // Copilot CLI: assistant.message.data.reasoningText non-empty.
+ bool uses_extended_thinking = 54;
+
+ // Dynamic tools registered for this Codex session (from thread_dynamic_tools table).
+ repeated string dynamic_tool_names = 55;
+
+ // All PRs referenced by pr-link events during the session. Deduped by
+ // (pr_repository, pr_number). The scalar pr_url / pr_number / pr_repository
+ // fields above continue to carry the first reference for backward compat.
+ repeated PRReference pr_references = 56;
+
+ // Every distinct git branch observed during the session, in first-seen
+ // order. BRANCH_MATCH attribution iterates every entry so a session that
+ // works across multiple branches (e.g. master → feature, or feature-1 →
+ // feature-2) can match a PR on any of them. For single-branch sources
+ // (Codex SQLite threads.git_branch, Copilot cliContext.branch) the array
+ // carries exactly one element.
+ repeated string git_branches = 57;
+
+ // Every branch observed during the session, each with how it was obtained.
+ //
+ // This field, git_branches (57) and the deprecated git_branch scalar (28)
+ // MERGE by branch name — none supersedes another as a SET. Where a name
+ // appears in more than one, the highest source wins; a name carried only by
+ // the older fields enters at UNSPECIFIED. So a partly-migrated producer
+ // degrades a branch's source rather than losing the branch.
+ repeated BranchSignal branch_signals = 94;
+
+ // ── Agentic IDE signals ───────────────────────────────────────────────────
+ // Fields 58–77 are generic signals any agentic IDE can populate.
+ // Currently populated by Kiro only.
+
+ // Agent execution mode (e.g., "agent", "spec", "vibe").
+ // Currently populated by Kiro only.
+ string agent_mode = 58;
+
+ // Supervision level ("supervised" or "autopilot").
+ // Currently populated by Kiro only.
+ string autonomy_mode = 59;
+
+ // IDE-reported context-window utilization on a 0–100 scale, verbatim as the
+ // vendor reports it (Kiro: session_metadata.contextUsage.usagePercentage /
+ // rts_model_state.context_usage_percentage). The normalized 0.0–1.0 value
+ // consumers should read is UsageMetadata.effective_context_usage_percent,
+ // which divides this. Matches TurnUsage.context_usage_percent.
+ // Currently populated by Kiro only.
+ double ide_context_usage_percent = 60;
+
+ // MCP tool context as a fraction of the total context window (0.0–1.0).
+ // Currently populated by Kiro only.
+ double mcp_context_percent = 61;
+
+ // Steering / rules-file context as a fraction of the total context window (0.0–1.0).
+ // Currently populated by Kiro only.
+ double steering_context_percent = 62;
+
+ // Count of spec files (task definitions) present in the workspace.
+ // Currently populated by Kiro only (.kiro/specs/).
+ int32 spec_count = 63;
+
+ // Count of steering / rules files present in the workspace.
+ // Currently populated by Kiro only (.kiro/steering/).
+ int32 steering_file_count = 64;
+
+ // Count of lifecycle hook files present in the workspace.
+ // Currently populated by Kiro only (.kiro/hooks/).
+ int32 hook_count = 65;
+
+ // Names of sub-agents spawned during this session.
+ // Currently populated by Kiro only.
+ repeated string spawned_agent_names = 66;
+
+ // Number of steering / rules files injected into context for this session.
+ // Currently populated by Kiro only.
+ int32 steering_inclusion_count = 67;
+
+ // Names of steering / rules docs injected into context.
+ // Currently populated by Kiro only.
+ repeated string steering_docs_used = 68;
+
+ // Parent session ID for sessions spawned as sub-agents.
+ // Currently populated by Kiro only.
+ string parent_session_id = 69;
+
+ // Billing quota invocations consumed in this session.
+ // Currently populated by Kiro only (AWS CodeWhisperer invocation model).
+ int32 quota_invocations_used = 70;
+
+ // Billing quota invocation limit for the account.
+ // Currently populated by Kiro only (AWS CodeWhisperer invocation model).
+ int32 quota_invocations_limit = 71;
+
+ // Total HTTP requests made to the model API during the session.
+ // Currently populated by Kiro CLI only.
+ int32 total_model_request_count = 72;
+
+ // Total agentic execution cycles during the session.
+ // Currently populated by Kiro CLI only.
+ int32 total_agent_cycles = 73;
+
+ // Billing credits consumed during the session (IDE-specific unit).
+ // Currently populated by Kiro only (AWS credits per turn).
+ double billing_credits_used = 74;
+
+ // Filesystem paths the agent is allowed to read (permission sandbox).
+ // Currently populated by Kiro CLI only.
+ repeated string sandbox_allowed_read_paths = 75;
+
+ // Filesystem paths the agent is allowed to write (permission sandbox).
+ // Currently populated by Kiro CLI only.
+ repeated string sandbox_allowed_write_paths = 76;
+
+ // Maximum output tokens configured for the session.
+ // Currently populated by Kiro only.
+ int32 max_output_tokens = 77;
+
+ // How this unit relates to its parent, set by the adapter from the unit's own
+ // on-disk data. A human-driven session carries relation_type = PRIMARY (or an
+ // old client sends nothing, read as PRIMARY). A child (subagent/plugin/hook)
+ // carries its parent's id and the keys that join it upward. See the
+ // session-lineage design.
+ SessionLineage lineage = 78;
+
+ // Vendor-reported actual cost in USD (not a token estimate). Populated by
+ // Cursor from composerData.usageData.default.costInCents (÷100); the backend
+ // prefers it over the token-derived estimate when > 0.
+ double reported_cost_usd = 79;
+ // Absolute context-window occupancy at the thread level. Cursor:
+ // composerData.contextTokensUsed / contextTokenLimit. Complements the
+ // percentage; unset when the surface doesn't report it.
+ int32 context_tokens_used = 80;
+ // Window size the used count is measured against (contextTokenLimit).
+ int32 context_token_limit = 81;
+ // context_composition breaks the session's context-window usage into the
+ // segments the surface reports, each with its token footprint. Written by the
+ // extractor from surfaces that expose it (Cursor CLI's per-turn context
+ // block); empty otherwise. The backend mirrors it to
+ // UsageMetadata.context_composition.
+ repeated ContextSegment context_composition = 82;
+
+ // ── Agentic session detail (83–93) ────────────────────────────────────────
+ // Written by Kiro today. They describe behaviour any agentic surface can
+ // report — approval gating, retries, per-turn metering — so a later extractor
+ // fills the same fields rather than adding parallel ones.
+
+ // The surface-qualified session key, identical to
+ // Conversation.session_id: "kiro-ide:<vendor id>" for the IDE format,
+ // "kiro-cli:<vendor id>" for the CLI. Carried inside SessionMeta so a reader
+ // holding only this blob can identify the session, and so one field keys a
+ // session across both Kiro surfaces without them colliding.
+ //
+ // NOTE: this is deliberately NOT the vendor's raw id. Strip the "kiro-ide:" /
+ // "kiro-cli:" prefix to recover the id Kiro's own logs and UI use.
+ string kiro_id = 83;
+
+ // Tool-approval prompts keyed by the vendor's own option token
+ // (allow_once / allow_always / reject_once / reject_always). The sum is how
+ // often the agent was gated at all; a large allow_always share means the user
+ // has stopped being asked, which is a different posture from never gating.
+ map<string, int32> tool_approval_outcomes = 84;
+
+ // Model API attempts INCLUDING retries. Exceeds total_model_request_count by
+ // exactly the number of retried requests, so the difference is the retry count.
+ int32 model_request_attempts = 85;
+
+ // Vendor-measured seconds the agent was actually working, summed over turns.
+ // Unlike duration_minutes (wall-clock, includes idle) the IDE measures this
+ // itself. Kiro: Σ usage_summary.elapsedTime (IDE), Σ turn_duration (CLI).
+ double agent_active_seconds = 86;
+
+ // Per-turn breakdown. billing_credits_used and agent_active_seconds are the
+ // sums of this; it is kept because the distribution answers questions the
+ // totals cannot (one runaway turn vs. many even ones).
+ repeated TurnUsage turn_usage = 87;
+
+ // One entry per sub-agent delegation, with its outcome. The children's own
+ // metrics are folded into this session, so this is the only record that the
+ // delegations happened and whether they succeeded.
+ repeated SubAgentRun sub_agent_runs = 88;
+
+ // Total characters the user typed across the session. Vendor-reported, so it
+ // covers turns whose text was never persisted.
+ int32 user_prompt_chars = 89;
+ // Total characters the assistant produced across the session. Vendor-reported,
+ // so it covers turns whose text was never persisted. Includes turns a delegated
+ // sub-agent produced where the surface folds them into the parent.
+ int32 assistant_response_chars = 90;
+
+ // Built-in (non-MCP) tool invocations as counted by the vendor.
+ int32 builtin_tool_uses = 91;
+
+ // Tool calls keyed by where the tool came from, using the vendor's origin
+ // token (Kiro: "default" for built-ins, "acp" for an Agent-Client-Protocol
+ // peer). Deliberately NOT folded into uses_mcp — ACP is not MCP.
+ map<string, int32> tool_origin_counts = 92;
+
+ // The agent-mode configuration the session ran under.
+ AgenticSessionConfig agentic_session_config = 93;
+
+ // How THIS session ran: "interactive" or "background" (headless). A
+ // per-session fact — an interactive and a headless session extracted in the
+ // same batch carry different values. Empty when the producing surface does
+ // not report it or the session's kind was not knowable at extraction.
+ // Populated by Claude Code today. Replaces the deprecated install-level
+ // InstallationMetadata.session_kind, which described the machine, not the session.
+ string session_kind = 95;
+}
+
+// TurnUsage is one user turn's metering. A field left unset means the surface
+// did not report it; a zero is a measured zero.
+message TurnUsage {
+ // Vendor billing units the turn consumed. Kiro meters in CREDITS, not tokens.
+ // Same unset-vs-zero and extractor_version-dating contract as
+ // PromptMetadata.context_usage_percent.
+ optional double credits = 1;
+ // Seconds the agent worked on this turn.
+ optional double active_seconds = 2;
+ // Context-window occupancy after the turn, on a 0–100 scale.
+ optional double context_usage_percent = 3;
+ // Tools the turn invoked, in call order. Repeats are meaningful — this is a
+ // sequence, not a set, and is what distinguishes a retry loop from a plan.
+ repeated string tool_names = 4;
+ // Why the turn ended, verbatim vendor token (Kiro CLI: "UserTurnEnd",
+ // "ToolUseRejected"; Kiro IDE stopReason: "end_turn", "cancelled").
+ string end_reason = 5;
+ // Model that served the turn, verbatim — may be a router alias such as "auto".
+ string model = 6;
+}
+
+// SubAgentRun records one delegation to a sub-agent.
+message SubAgentRun {
+ // Display name, e.g. "context-gatherer". Never the child's opaque id.
+ string name = 1;
+ // Terminal status, verbatim from the vendor, e.g. "success".
+ string status = 2;
+ // The vendor's id for the child execution, which joins to its on-disk
+ // transcript. NOT a conversation record key: the child is folded into this
+ // session rather than stored as its own row, so nothing resolves it upward.
+ string sub_session_id = 3;
+}
+
+// AgenticSessionConfig is the agent-mode configuration a session ran under.
+message AgenticSessionConfig {
+ // Lifecycle status when captured, verbatim (Kiro: in_progress / idle / completed).
+ string status = 1;
+ // Spec workflow selected, verbatim (Kiro: "quick").
+ string spec_workflow = 2;
+ // Each flag is `optional` so an omitted Kiro setting stays distinguishable from
+ // an explicit false. Kiro leaves these keys out on a session that never touched
+ // the setting, and a plain proto3 bool would collapse both to false — reporting
+ // "the user turned it off" for a session that never expressed a preference.
+ // Whether spec planning was enabled.
+ optional bool spec_plan_enabled = 3;
+ // Whether the semantic-review pass was enabled.
+ optional bool semantic_review_enabled = 4;
+ // Whether fast tool approval was enabled — the setting that suppresses
+ // per-tool approval prompts, so it explains a low tool_approval_outcomes sum.
+ optional bool fta_enabled = 5;
+}
+
+// ContextSegment is one row of a session's context-window composition — how many
+// tokens a named part of the prompt (system_prompt, tools, rules, skills,
+// conversation, …) occupied. Populated from surfaces that report a context
+// breakdown (Cursor CLI); see SessionMeta.context_composition and
+// UsageMetadata.context_composition. Defined here (not session.proto) so both
+// SessionMeta and UsageMetadata can reference it — session.proto imports this
+// file, so the reverse would be a circular import.
+message ContextSegment {
+ // segment is the composition category id, e.g. "system_prompt", "tools",
+ // "rules", "skills", "conversation".
+ string segment = 1;
+ // tokens is the segment's token footprint in the context window.
+ int64 tokens = 2;
+ // chars is the segment's character count as the surface reported it (~4×
+ // tokens); kept for fidelity to the source, 0 when not reported.
+ int64 chars = 3;
+}
+
+// ─── Session lineage (session-lineage design) ───────────────────
+
+// ConversationType classifies a captured unit by how it relates to its parent session.
+enum ConversationType {
+ // CONVERSATION_TYPE_UNSPECIFIED means absent lineage (old client); treated as PRIMARY.
+ CONVERSATION_TYPE_UNSPECIFIED = 0;
+ // CONVERSATION_TYPE_PRIMARY is a human-driven session.
+ CONVERSATION_TYPE_PRIMARY = 1;
+ // CONVERSATION_TYPE_SUBAGENT is a spawned agent (Task tool, Codex child thread).
+ CONVERSATION_TYPE_SUBAGENT = 2;
+ // CONVERSATION_TYPE_PLUGIN is a plugin-spawned agent.
+ CONVERSATION_TYPE_PLUGIN = 3;
+ // CONVERSATION_TYPE_HOOK is a non-interactive run invoked by automation rather
+ // than a human — a hook firing `codex exec`, a headless `claude -p`/SDK call.
+ // It has no human-authored prompt, so it is skipped from standalone analysis.
+ CONVERSATION_TYPE_HOOK = 4;
+}
+
+// LinkageConfidence classifies how the child→parent link was established. Only
+// STRONG links aggregate into the parent's leverage totals.
+enum LinkageConfidence {
+ // LINKAGE_CONFIDENCE_UNSPECIFIED means not set; treated like NONE — excluded, never aggregated.
+ LINKAGE_CONFIDENCE_UNSPECIFIED = 0;
+ // LINKAGE_CONFIDENCE_STRONG means an on-disk key (subagent dir, spawn edge) tied the child to the parent.
+ LINKAGE_CONFIDENCE_STRONG = 1;
+ // LINKAGE_CONFIDENCE_HEURISTIC means inferred (temporal containment) — excluded, never aggregated.
+ LINKAGE_CONFIDENCE_HEURISTIC = 2;
+ // LINKAGE_CONFIDENCE_NONE means the parent is unresolved — excluded, never aggregated.
+ LINKAGE_CONFIDENCE_NONE = 3;
+}
+
+// SessionLineage is a child's link up to its parent. Filled by the adapter;
+// blank-capable fields stay zero where the IDE has no signal (the per-IDE
+// adapter matrix is the contract). The consumer persists this into the child's
+// raw_records.metadata.
+message SessionLineage {
+ // relation_type is what kind of unit this is relative to its parent.
+ ConversationType relation_type = 1;
+ // parent_session_id is the parent's BARE native session/thread id (Claude Code
+ // session uuid; Codex parent_thread_id) — never a projectDir-composite, so a
+ // git-worktree child still resolves.
+ string parent_session_id = 2;
+ // tool_use_id joins a subagent to the parent's Task tool_use (CC meta.json).
+ string tool_use_id = 3;
+ // spawn_depth is the nesting level; 0/1 for direct children.
+ int32 spawn_depth = 4;
+ // origin_agent_type is the agent kind, e.g. "Explore", "feature-dev:code-reviewer".
+ string origin_agent_type = 5;
+ // plugin_name is set when origin_agent_type is plugin-namespaced.
+ string plugin_name = 6;
+ // linkage_confidence is how the parent link was established; only STRONG aggregates.
+ LinkageConfidence linkage_confidence = 7;
+ // tokens is this child's own token count, added into the parent's subagent-usage total.
+ int64 tokens = 8;
+ reserved 9; // formerly cost_usd_micros; the desktop never prices a child — the backend does
+ reserved "cost_usd_micros";
+}
+
+// SubagentUsage is the parent's aggregated view of its delegated (SUBAGENT +
+// PLUGIN) children: summed tokens, how many ran, and the per-agent breakdown.
+// Backend-derived and memoized on the parent's usage_metadata; never scanned on
+// a read.
+message SubagentUsage {
+ // total_tokens is Σ tokens across the parent's aggregated children.
+ int64 total_tokens = 1;
+ reserved 2; // formerly total_cost_usd_micros (int64 micros); superseded by field 5
+ reserved "total_cost_usd_micros";
+ // child_count is the number of aggregated (STRONG SUBAGENT/PLUGIN) children.
+ int32 child_count = 3;
+ // spawned_agents is the per-agent breakdown ("which subagents/plugins ran").
+ repeated SpawnedAgent spawned_agents = 4;
+ // total_estimated_cost_usd is Σ estimated cost across the parent's aggregated
+ // children, each priced from its own transcript. Zero for children ingested
+ // before child pricing existed, until they are reprocessed.
+ double total_estimated_cost_usd = 5;
+}
+
+// SpawnedAgent is one row of the parent's spawned-agent breakdown.
+message SpawnedAgent {
+ // agent_type is the agent kind, e.g. "Explore", "feature-dev:code-reviewer".
+ string agent_type = 1;
+ // plugin_name is empty for a built-in agent.
+ string plugin_name = 2;
+ // count is how many children of this agent_type were aggregated.
+ int32 count = 3;
+ // tokens is Σ tokens for this agent_type.
+ int64 tokens = 4;
+ // estimated_cost_usd is Σ estimated cost for this agent_type's children.
+ double estimated_cost_usd = 5;
+}
+
+// Pre-computed session quality analysis from Claude Code insights.
+// Optional — only present when CC ran its insights analysis for this session.
+// Values are free-form strings/maps produced by the CC insights LLM pass.
+message SessionFacets {
+ // Session result: "fully_achieved", "partially_achieved", "not_achieved", "abandoned".
+ string outcome = 1;
+
+ // How helpful Claude was: "very_helpful", "somewhat_helpful", "not_helpful".
+ string claude_helpfulness = 2;
+
+ // What the user was doing: "implementation", "debugging", "refactoring", "exploration", etc.
+ string session_type = 3;
+
+ // One-sentence summary of what happened in the session.
+ string brief_summary = 4;
+
+ // The deeper goal behind the user's request (e.g., "ship OAuth before Friday").
+ string underlying_goal = 5;
+
+ // Categorized goal breakdown (e.g., {"feature_work": 1, "bug_fix": 1}).
+ map<string, int32> goal_categories = 6;
+
+ // The main thing that went well in the session.
+ string primary_success = 7;
+
+ // Friction event counts by type (e.g., {"wrong_approach": 2, "slow_response": 1}).
+ map<string, int32> friction_counts = 8;
+
+ // Free-text description of the main friction points encountered.
+ string friction_detail = 9;
+
+ // User satisfaction signals by type (e.g., {"explicit_praise": 1, "implicit_acceptance": 3}).
+ map<string, int32> user_satisfaction_counts = 10;
+}
+
+// Per-upload installation metadata (plan tier, device info).
+// Populated by the desktop app from local IDE files / telemetry.
+message InstallationMetadata {
+ // Plan tier: "free", "pro", "team", "enterprise", "pro_or_free".
+ string plan_tier = 1;
+
+ // How the tier was determined: "cursor_vscdb" (exact) or "cc_telemetry_inferred".
+ string plan_tier_source = 2;
+
+ // Login email from IDE (Cursor cachedEmail or CC telemetry email).
+ string login_email = 3;
+
+ // Unique device hash (Claude Code telemetry).
+ string device_id = 4;
+
+ // How the IDE was launched: "claude-vscode", "claude-code" (CLI). Read from
+ // install-level telemetry, so it describes the install, not any one session —
+ // it cannot answer session-mode (interactive vs headless) questions. A
+ // per-session run mode lives in SessionMeta.session_kind.
+ string entrypoint = 5;
+
+ // Claude Code version string.
+ string cc_version = 6;
+
+ // OS platform: "darwin", "linux", "win32".
+ string platform = 7;
+
+ // Whether OAuth auth was used (vs API key).
+ bool is_oauth_auth = 8;
+
+ // Anthropic org UUID (present → Team/Enterprise).
+ string organization_uuid = 9;
+
+ // Anthropic account UUID.
+ string account_uuid = 10;
+
+ // Deprecated: this is on InstallationMetadata (install-level) but carries a
+ // per-session fact, so it was computed once per extraction run and stamped
+ // identically onto every session in the batch — describing the machine, not
+ // the session. Producers no longer write it and readers no longer read
+ // it, not even as a fallback: the per-session SessionMeta.session_kind is
+ // authoritative. So a conversation carrying only this field — a pre-upgrade
+ // client's upload, or a historical row reprocessed after the move — resolves
+ // session_kind to empty. That drops the old machine-scoped value; downstream,
+ // computeDelegationLevel maps an empty CC session_kind to a distinct
+ // delegation_level "unknown" (excluded from the interactive / assisted /
+ // delegated known-mode buckets), so an undetermined mode is never counted as
+ // hands-on interactive. Historical at-rest rows keep the field; it is not
+ // backfilled.
+ string session_kind = 11 [deprecated = true];
+
+ // Cursor-specific metadata.
+ string cursor_onboarding_date = 12;
+ bool cursor_privacy_mode = 13;
+ bool cursor_memories_enabled = 14;
+ bool cursor_personal_context_configured = 15;
+
+ // Cursor's session quality classification from conversationClassificationScoredConversations.
+ string cursor_conversation_scoring = 16;
+
+ // Currently active model in the VS Code chat panel (from chat.currentLanguageModel.panel).
+ string default_model = 17;
+
+ // Last used chat mode: "agent", "chat", "edit" (from chat.lastChatMode in state.vscdb).
+ string last_chat_mode = 18;
+
+ // IDE version string. Currently populated by Kiro only (CC equivalent: cc_version).
+ string ide_version = 19;
+
+ // IDE device / machine identifier. Currently populated by Kiro only.
+ string ide_machine_id = 20;
+
+ // ── Claude Code authoritative account record (~/.claude.json `oauthAccount`).
+ // Raw values, persisted verbatim; the canonical plan_tier is derived from
+ // these on the backend rather than inferred from telemetry. ──
+
+ // Anthropic seat tier, e.g. "team_tier_1". Authoritative; not inferred.
+ string seat_tier = 21;
+ // Anthropic org classification, e.g. "claude_team", "claude_enterprise".
+ string organization_type = 22;
+ // Billing mechanism, e.g. "stripe_subscription".
+ string billing_type = 23;
+ // Member role within the org, e.g. "user", "admin".
+ string organization_role = 24;
+ // Org-level rate-limit tier, e.g. "default_raven".
+ string organization_rate_limit_tier = 25;
+ // User-level rate-limit tier, e.g. "default_claude_max_5x".
+ string user_rate_limit_tier = 26;
+ // Subscription creation time (from oauthAccount.subscriptionCreatedAt).
+ google.protobuf.Timestamp subscription_created_at = 27;
+ // Whether the account has extra-usage / overage enabled
+ // (oauthAccount.hasExtraUsageEnabled). Boolean flag only — the overage
+ // amount/cost is NOT exposed by ~/.claude.json, so it is surfaced but not
+ // allocated. (login_email = field 3 carries oauthAccount.emailAddress.)
+ bool has_extra_usage_enabled = 28;
+
+ // ── Cursor Statsig account record. Raw values, persisted verbatim; the
+ // canonical plan_tier is derived from these on the backend.
+ //
+ // plan_tier (field 1) carries Cursor's own membership string, which
+ // collapses every team seat — Teams Standard, Teams Premium, and
+ // Enterprise Custom — onto one value. The fields below separate a
+ // priceable self-serve Teams seat from an unpriceable negotiated contract.
+ // Standard and Premium stay indistinguishable from the fields in THIS
+ // block: no locally-readable signal separates them. cursor_billing_tier,
+ // further down, is the field that does — it comes from the vendor's own
+ // dashboard rather than from local state. Both the IDE and the CLI report
+ // the fields in this block identically. ──
+
+ // True when the seat belongs to a negotiated Enterprise Custom contract,
+ // which carries no list price. False on a self-serve Teams seat. Equivalent
+ // to the `teamMembershipType != SELF_SERVE` distinction Cursor's account API
+ // returns, but readable locally.
+ bool is_enterprise_user = 29;
+ // True during an Enterprise trial. Distinct from is_enterprise_user, which
+ // stays false for a trial — so pricing must require BOTH false before
+ // treating a seat as paid self-serve Teams.
+ bool is_enterprise_trial_user = 30;
+ // Cursor team identifier; present exactly when the account belongs to a
+ // team. Its presence, not the plan_tier string, is what identifies a team
+ // seat. Also a vendor-side seat-grouping key, stabler than a hashed email.
+ string cursor_team_id = 31;
+ // Member role within the Cursor team, verbatim as the vendor reported it.
+ // Price-bearing: an unpaid-admin role is a $0 seat, so any pricing path must
+ // account for it or it over-counts that seat at the paid team rate.
+ // Do not assume a casing — the local blob has been seen lowercase, the vendor
+ // API returns an uppercase form, and the unpaid-admin spelling has not been
+ // observed on a live install at all, so match case-insensitively.
+ string cursor_team_role = 32;
+ // Cursor's stable per-member account identifier. The Cursor counterpart of
+ // account_uuid: unlike cursor_team_id, which every member of a team shares,
+ // this identifies one person, and unlike an email it survives a change of
+ // address. Captured so seat identity can move off the hashed-email fallback;
+ // nothing keys on it yet.
+ string cursor_user_id = 33;
+
+ // ── Cursor seat facts read from the vendor's dashboard API. See. ──
+
+ // Per-member billing tier as Cursor reported it, e.g.
+ // "TEAM_MEMBER_BILLING_TIER_TIER_1000". Clients must not map this value; the
+ // canonical seat tier is derived server-side from an allowlist, so a vendor
+ // vocabulary change is a backend fix rather than a client release. Empty means
+ // no tier was observed for this seat: not evidence of any tier, not a default
+ // or free one, and not necessarily a fault — a team on a negotiated contract
+ // reports no per-member tier at all, which is a steady state.
+ string cursor_billing_tier = 34;
+ // Team subscription kind as Cursor reported it, e.g. "SELF_SERVE". Clients must
+ // not map it: what a non-self-serve value implies for pricing is the backend
+ // mapper's contract, not this field's. Empty carries the same meaning, and the
+ // same caution, as an empty cursor_billing_tier.
+ string cursor_team_membership_type = 35;
+ // Whether Cursor bills this team's subscription annually, as reported. Carries
+ // explicit presence because unset (Cursor reported no billing period) and a
+ // reported false are different facts and must stay distinguishable.
+ optional bool cursor_is_yearly_plan = 36;
+}
+
+// AI code attribution metrics from IDE tracking (Cursor ai-tracking.db).
+message AiAttribution {
+ // Total accepted tab completions (Cursor only).
+ int32 tab_completion_count = 1;
+ // AI code percentage: 0.0–1.0. Exact for Cursor (from scored_commits), approximate for CC.
+ double ai_code_percent = 2;
+ int32 tab_suggested_lines = 3;
+ int32 tab_accepted_lines = 4;
+ int32 composer_suggested_lines = 5;
+ int32 composer_accepted_lines = 6;
+ // Cursor 3+: model breakdown for tab completions (model → count).
+ map<string, int32> tab_completion_model_breakdown = 7;
+ // Cursor 3+: more accurate v2 AI percentage (0.0–1.0).
+ double ai_code_percent_v2 = 8;
+ // Cursor 3+: count of files removed during AI sessions.
+ int32 deleted_files_count = 9;
+ // When AI code tracking was first enabled (ISO timestamp).
+ string tracking_start_time = 10;
+}
+
+// Aggregate usage stats from Claude Code stats-cache.json (uploaded once daily).
+message StatsCacheSnapshot {
+ // Message count per hour of day (e.g., {"13": 5, "14": 12}).
+ map<string, int32> hour_counts = 1;
+
+ int32 total_sessions = 2;
+ int32 total_messages = 3;
+ int64 longest_session_duration_ms = 4;
+ int32 longest_session_message_count = 5;
+ string first_session_date = 6;
+
+ // Daily engagement activity.
+ repeated DailyActivity daily_activity = 7;
+
+ // Daily token usage broken down by model.
+ repeated DailyModelTokens daily_model_tokens = 8;
+
+ // Lifetime token usage per model.
+ map<string, ModelUsageStats> model_usage = 9;
+}
+
+// Daily engagement activity entry from stats-cache.json.
+message DailyActivity {
+ string date = 1;
+ int32 message_count = 2;
+ int32 session_count = 3;
+ int32 tool_call_count = 4;
+}
+
+// Daily token usage broken down by model from stats-cache.json.
+message DailyModelTokens {
+ string date = 1;
+ map<string, int64> tokens_by_model = 2;
+}
+
+// Lifetime token usage stats for a single model from stats-cache.json.
+message ModelUsageStats {
+ int64 input_tokens = 1;
+ int64 output_tokens = 2;
+ int64 cache_read_input_tokens = 3;
+ int64 cache_creation_input_tokens = 4;
+ int32 web_search_requests = 5;
+}
+enum Role {
+ ROLE_UNSPECIFIED = 0;
+ ROLE_USER = 1;
+ ROLE_ASSISTANT = 2;
+}

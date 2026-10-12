@@ -1,0 +1,68 @@
+// Copyright 2026 Workloom Solutions Private Limited
+// SPDX-License-Identifier: MIT
+
+
+syntax = "proto3";
+
+package sessionintelligence.common.v1;
+
+option go_package = "github.com/tetriz-ai/session-intelligence/gen/sessionintelligence/common/v1;commonv1";
+
+// Plan identifies which paid/trial plan an org is on — independent of
+// whether that plan is currently active or frozen. Pair with PlanState
+// whenever the caller needs both axes (typical case).
+//
+// Naming mirrors the schema: the `plans` table holds the master row
+// per Plan; `organisation_plans.state` holds the PlanState. Two enums,
+// two columns, one consistent pair.
+//
+// Lives in the common proto package so the serving layer, the identity service, and the shared
+// planscoped wrapper can all reference the same enum without crossing
+// service-group boundaries. Splitting into internal-vs-presentation
+// shapes is tracked separately — pick up when the serving layer needs to diverge
+// (presentation rename, marketing-only fields, etc.).
+enum Plan {
+ // PLAN_UNSPECIFIED means the server did not populate plan. Treat as
+ // a programming error — every active org has a current
+ // organisation_plans row.
+ PLAN_UNSPECIFIED = 0;
+ // PLAN_TRIAL is the default for new orgs and for the 30-day migration
+ // window applied to existing orgs at the time the trial-controls-
+ // seat-gating design ships.
+ PLAN_TRIAL = 1;
+ // PLAN_BASIC is the entry-level paid plan (capped seats, 180-day
+ // data window).
+ PLAN_BASIC = 2;
+ // PLAN_PRO is the unlimited plan (unless overridden via
+ // seats_limit_override).
+ PLAN_PRO = 3;
+ // PLAN_ENTERPRISE is the contract-only plan (unlimited seats and
+ // data window by default).
+ PLAN_ENTERPRISE = 4;
+ // PLAN_INDIVIDUAL_TRIAL is the trial plan for an individual (single-user)
+ // tenant — the individual-seat-model analog of PLAN_TRIAL.
+ PLAN_INDIVIDUAL_TRIAL = 5;
+ // PLAN_INDIVIDUAL is the paid plan for an individual (single-user) tenant.
+ PLAN_INDIVIDUAL = 6;
+}
+
+// PlanState mirrors organisation_plans.state — the orthogonal "is this
+// plan currently in good standing?" axis. Pair with Plan whenever the
+// caller needs both dimensions; reading either alone is almost always
+// wrong.
+//
+// Frozen-state preserves the underlying plan in the DB so an unfreeze
+// restores it without a re-link.
+enum PlanState {
+ // PLAN_STATE_UNSPECIFIED means the server did not populate state.
+ // Treat as a programming error.
+ PLAN_STATE_UNSPECIFIED = 0;
+ // PLAN_STATE_ACTIVE is the default state — the org's current plan is
+ // in good standing.
+ PLAN_STATE_ACTIVE = 1;
+ // PLAN_STATE_FROZEN means the org's plan expired (trial expiry or
+ // contract expiry) and the daily expiry-scan flipped it. Cleared by the
+ // plan-management RPCs (ExtendTrial / plan-change RPC).
+ PLAN_STATE_FROZEN = 2;
+}
+

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/tetriz-ai/session-intelligence/security/advisories/new
+    about: Report it privately through GitHub private vulnerability reporting (the Security tab → Report a vulnerability), not as an issue.

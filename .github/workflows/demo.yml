@@ -1,0 +1,28 @@
+name: Demo GIF
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/assets/demo.tape
+      - examples/**
+permissions:
+  contents: read
+jobs:
+  render:
+    name: Render demo GIF
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.25.x"
+      # Warm the module cache so the recorded run shows only each command's output.
+      - run: go build ./examples/...
+      - uses: charmbracelet/vhs-action@f6d7db07a432fcd3b06772628d36a57f96d95dcf # v2.1.1
+        with:
+          path: .github/assets/demo.tape
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: demo-gif
+          path: .github/assets/demo.gif

@@ -1,0 +1,22 @@
+Session Intelligence Engine
+Copyright 2026 Workloom Solutions Private Limited
+
+Licensed under the MIT License; see the LICENSE file.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+Go module dependencies are declared in go.mod and fetched by the Go toolchain;
+each carries its own license (all permissive: Apache-2.0, MIT, or BSD). This
+repository does not vendor their source.
+
+Generated Protobuf Go bindings under gen/ are produced by protoc-gen-go
+(google.golang.org/protobuf, BSD-3-Clause) from the .proto sources under proto/.
+
+The bundled reference service under reference-llm/ depends on third-party Python
+packages declared in reference-llm/pyproject.toml, each under its own license.
+
+CODE_OF_CONDUCT.md is adapted from the Contributor Covenant, version 2.1,
+https://www.contributor-covenant.org/version/2/1/code_of_conduct/,
+licensed under CC BY 4.0, https://creativecommons.org/licenses/by/4.0/.

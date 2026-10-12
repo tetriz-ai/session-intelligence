@@ -1,0 +1,17 @@
+# tetriz-py shared configuration
+# Values common across all environments.
+# Environment-specific overrides: tetriz-py-{development,deploy,prod}.yml
+# Environment variables take highest priority.
+
+server:
+  HOST: "0.0.0.0"
+  PORT: 8000
+
+llm:
+  REQUEST_TIMEOUT: 180
+
+langfuse:
+  ENABLED: false
+  PUBLIC_KEY: ""
+  SECRET_KEY: ""
+  HOST: ""

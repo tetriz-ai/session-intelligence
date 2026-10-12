@@ -1,0 +1,32 @@
+// Copyright 2026 Workloom Solutions Private Limited
+// SPDX-License-Identifier: MIT
+
+syntax = "proto3";
+
+package sessionintelligence.common.v1;
+
+option go_package = "github.com/tetriz-ai/session-intelligence/gen/sessionintelligence/common/v1;commonv1";
+
+import "buf/validate/validate.proto";
+
+// HarnessHookConfig is a HOOK-type enforced artifact's settings.json
+// activation (design: harness-control-plane-control) — flat and tool-agnostic;
+// how a given tool spells this on disk is the device's job, not this
+// contract's. Shared between the engine harness_org_artifacts.hook_config
+// JSONB column and the serving layer UpsertEnforcedArtifact request, so
+// neither side depends on the other's package. The command that invokes the
+// artifact's script is derived server-side from (ide_type, scope, slug), not
+// carried here — an arbitrary shell string has no representation.
+message HarnessHookConfig {
+ // event is the hook lifecycle event (e.g. "PreToolUse"), validated against
+ // the target tool's own vocabulary — an unrecognized event for the
+ // artifact's ide_type is rejected at the write rather than becoming a hook
+ // that silently never fires.
+ string event = 1 [(buf.validate.field).string = {min_len: 1, max_len: 128}];
+ // matcher narrows which subject the hook applies to; "" matches every
+ // subject. Its meaning is per-event, not a universal tool pattern.
+ string matcher = 2 [(buf.validate.field).string.max_len = 256];
+ // timeout_seconds bounds the hook's run time; 0 means unset, and tools
+ // without a timeout concept ignore it.
+ int32 timeout_seconds = 3;
+}

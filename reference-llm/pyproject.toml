@@ -1,0 +1,107 @@
+[project]
+name = "reference-llm"
+version = "0.1.0"
+description = "LLM processing service for Session Intelligence"
+requires-python = ">=3.11"
+dependencies = [
+    # Capped below 0.137: that release wraps included routers as `_IncludedRouter`
+    # objects with no `.path`, which prometheus-fastapi-instrumentator 7.1.0's route-name
+    # walker dereferences and crashes on — turning every request into a 500. 0.136.x is
+    # the last release whose `app.routes` are plain Starlette routes the walker handles.
+    "fastapi>=0.115.0,<0.137",
+    "uvicorn[standard]>=0.34.0,<1.0",
+    "pydantic>=2.10.0,<3.0",
+    "pydantic-settings>=2.7.0,<3.0",
+    "pyyaml>=6.0,<7.0",
+    # Capped below 25.0 as a precaution: 25.x is a major release and the structlog
+    # pipeline set up in app/config/logging.py has not been validated against its API
+    # changes. Raise the cap once that logging setup is confirmed on 25.x.
+    "structlog>=24.0.0,<25.0",
+    "httpx>=0.28.0,<1.0",
+    "google-genai>=2.5.0,<3.0",
+    "langfuse>=3.0.0,<4.0",
+    "prometheus-fastapi-instrumentator>=7.0.0,<8.0",
+    # Imported directly by app/metrics.py, so declared explicitly rather than leaned on
+    # as a transitive of prometheus-fastapi-instrumentator.
+    "prometheus-client>=0.20.0,<1.0",
+    # Imported directly at module load by the round-trip detector's feature/classifier
+    # code (app/ml_model_inference/...), which the detect-round-trips router imports even
+    # when the detector is disabled. Declared explicitly so the base install carries it
+    # without the heavy ML stack (torch/sentence-transformers live in the `ml` extra).
+    "numpy>=1.26.0,<3.0",
+]
+
+[project.optional-dependencies]
+# The round-trip detector's heavy ML runtime. The shipped classifier is an uncalibrated
+# placeholder and the detector is disabled by default, so the base service installs and runs
+# without this stack; install it (`uv sync --extra ml`) only to bake and serve a real bundle.
+ml = [
+    # Pinned to 5.x to match the version the embed-classify centroid bundle's
+    # MiniLM encoder was saved with (SentenceTransformer.save). A 2.x runtime
+    # cannot load a 5.x-saved model dir (it raises ModuleNotFoundError on
+    # sentence_transformers.base at startup). Bundle generation + runtime must
+    # share the same major version.
+    "sentence-transformers>=5.6.0,<6.0",
+    # torch is listed explicitly so the [tool.uv.sources] override applies —
+    # uv's source overrides require a direct project dependency to hook.
+    # sentence-transformers pulls torch transitively; without this line the
+    # Linux CUDA wheel wins. See [tool.uv.sources] below.
+    "torch>=2.7.0,<3.0",
+]
+
+# Dev tooling, as a uv dependency-group so `uv sync` / `uv run` include it by default
+# (the base service install does not ship pytest/ruff).
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
+    "ruff>=0.9.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ─── torch CPU-only pin (Linux/Docker only) ────────────────────
+#
+# sentence-transformers pulls torch, which on Linux defaults to the CUDA
+# wheel (~800 MB + ~2 GB of nvidia-* runtime packages: cuDNN, NCCL,
+# cuBLAS, triton, …). This service runs CPU-only text embedding
+# inference; GPU runtime is dead weight.
+#
+# On Linux we route torch through PyTorch's CPU index, which drops the
+# nvidia-* chain entirely and shrinks torch itself to ~200 MB.
+# On macOS (dev) the default PyPI wheel is already CPU-only (arm64) —
+# no override needed, so the marker scopes to Linux.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/llm/prompts/*.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    # An eval that calls a real LLM provider (needs a provider key). Excluded from the default
+    # offline test run so it stays green without a key; run it explicitly with `-m provider_eval`.
+    "provider_eval: an eval that calls an LLM provider; needs credentials, run it explicitly",
+]
+addopts = "-m 'not provider_eval'"

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build ./...)",
+      "Bash(go vet ./...)",
+      "Bash(go test -race -count=1 ./...)",
+      "Bash(scripts/run-examples.sh)",
+      "Bash(GOTOOLCHAIN=go1.25.9 golangci-lint run)"
+    ]
+  }
+}

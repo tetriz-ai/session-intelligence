@@ -1,0 +1,11 @@
+# Regenerates the Go stubs under gen/ from proto/. The protos set an explicit go_package,
+# so managed mode stays off. This repo has no gRPC services, so only protoc-gen-go runs; the
+# protovalidate rules are descriptor annotations evaluated at runtime, not a separate plugin.
+# Run: buf generate   (buf dep update first after changing buf.yaml deps).
+version: v2
+managed:
+  enabled: false
+plugins:
+  - local: protoc-gen-go
+    out: gen
+    opt: paths=source_relative

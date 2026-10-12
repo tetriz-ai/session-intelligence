@@ -1,0 +1,41 @@
+version: "2"
+linters:
+  default: standard
+  enable:
+    - misspell
+    - revive
+  exclusions:
+    # Generated protobuf Go bindings under gen/ are not hand-maintained; regenerate, do not lint.
+    paths:
+      - gen/
+    rules:
+      # SessionAnalysisProcessor and s3.S3Client are the established public API names, used in the
+      # README, examples and CLAUDE.md; renaming them to satisfy the stutter check would break the
+      # documented quickstart and every caller for no behavioural gain.
+      - linters: [revive]
+        text: "stutters"
+      # The evidence-commit chain uses two intentional empty branches to intercept the pending and
+      # settled states before the NOT_FIRED else. They are documented no-ops, not dead code.
+      - linters: [revive]
+        path: sessionanalysis/sessionanalysis_producers\.go
+        text: "empty-block"
+      # A gomock callback signature in a security test file whose shape is fixed by the mock.
+      - linters: [revive]
+        path: dao/security_flag_repo_test\.go
+        text: "unused-parameter"
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      # Keep the module's own imports in their own group.
+      local-prefixes:
+        - github.com/tetriz-ai/session-intelligence
+  exclusions:
+    paths:
+      - gen/
+issues:
+  # Show every finding, so a "0 issues" run is honest (the defaults hide duplicates).
+  max-issues-per-linter: 0
+  max-same-issues: 0

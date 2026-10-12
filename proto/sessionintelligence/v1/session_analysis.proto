@@ -1,0 +1,1479 @@
+// Copyright 2026 Workloom Solutions Private Limited
+// SPDX-License-Identifier: MIT
+
+syntax = "proto3";
+
+package sessionintelligence.v1;
+
+option go_package = "github.com/tetriz-ai/session-intelligence/gen/sessionintelligence/v1;sessionintelligencepb";
+
+// conversation.proto contributes the reused telemetry types this file
+// references by bare name (same package): SessionEventOutcome (a ToolCall's
+// outcome) and the SessionEvent* family.
+import "sessionintelligence/v1/conversation.proto";
+// The coverage tool on SignalCoverageCell uses the canonical shared IDE enum,
+// not the legacy session-local one (per conversation.proto's IdeType note).
+import "sessionintelligence/common/v1/ide_type.proto";
+
+// ─────────────────────────────────────────────────────────────────────────
+// Appendix A — Enums (Session Analysis Engine)
+//
+// Every enum carries a *_UNSPECIFIED = 0 zero value per buf STANDARD
+// (ENUM_ZERO_VALUE_SUFFIX). Where a value reads `none`/`unknown`/`unclear`,
+// it is a real non-zero member ("we looked and could not tell"), distinct
+// from the unset zero. Reused enums (SessionEventAuthor, SessionEventOutcome,
+// the SessionToPR* family) live in the sibling protos and are not redefined
+// here. WorkType and CoverageTool are not new enums: the work_type column
+// reuses PhaseTheme and the coverage tool reuses the canonical shared
+// sessionintelligence.common.v1.IdeType.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ── Orchestration ──
+
+// SessionAnalysisStatus is the lifecycle state of a session's analysis on the
+// orchestration (state) table.
+enum SessionAnalysisStatus {
+ // SESSION_ANALYSIS_STATUS_UNSPECIFIED means the row has no state yet.
+ SESSION_ANALYSIS_STATUS_UNSPECIFIED = 0;
+ // SESSION_ANALYSIS_STATUS_PENDING means claimed for processing, not yet run.
+ SESSION_ANALYSIS_STATUS_PENDING = 1;
+ // SESSION_ANALYSIS_STATUS_SPINE_DONE means the free spine ran but no judged
+ // producer has completed (e.g. every producer flag is off).
+ SESSION_ANALYSIS_STATUS_SPINE_DONE = 2;
+ // SESSION_ANALYSIS_STATUS_JUDGED means the judged tier resolved; the row is
+ // servable (see judged_disposition for whether every producer ran).
+ SESSION_ANALYSIS_STATUS_JUDGED = 3;
+ // SESSION_ANALYSIS_STATUS_FAILED means processing errored; re-admitted on the
+ // provider-outage retry path.
+ SESSION_ANALYSIS_STATUS_FAILED = 4;
+ // SESSION_ANALYSIS_STATUS_SUPERSEDED means an older generation replaced by a
+ // live one under the same raw_record; excluded from serving.
+ SESSION_ANALYSIS_STATUS_SUPERSEDED = 5;
+ // SESSION_ANALYSIS_STATUS_SKIPPED means intentionally not analysed; every
+ // skip is conditional and re-admitted when its condition changes (skip_reason).
+ SESSION_ANALYSIS_STATUS_SKIPPED = 6;
+}
+
+// SessionAnalysisSkipReason is the closed vocabulary of why a session was
+// SKIPPED; each reason names the re-admission condition that later revives it.
+enum SessionAnalysisSkipReason {
+ // SESSION_ANALYSIS_SKIP_REASON_UNSPECIFIED means no skip reason recorded.
+ SESSION_ANALYSIS_SKIP_REASON_UNSPECIFIED = 0;
+ // SESSION_ANALYSIS_SKIP_REASON_CHILD means a delegated child session folded
+ // into its parent rather than analysed on its own.
+ SESSION_ANALYSIS_SKIP_REASON_CHILD = 1;
+ // SESSION_ANALYSIS_SKIP_REASON_NO_SEAT means the person held no seat at gate
+ // time; re-admitted when they become seated.
+ SESSION_ANALYSIS_SKIP_REASON_NO_SEAT = 2;
+ // SESSION_ANALYSIS_SKIP_REASON_OUT_OF_WINDOW means the session predates the
+ // plan's data window; re-admitted when the window cutoff moves.
+ SESSION_ANALYSIS_SKIP_REASON_OUT_OF_WINDOW = 3;
+ // SESSION_ANALYSIS_SKIP_REASON_REPO_UNTRACKED_METADATA means the session's
+ // metadata repo is untracked; re-admitted when the repo becomes tracked.
+ SESSION_ANALYSIS_SKIP_REASON_REPO_UNTRACKED_METADATA = 4;
+ // SESSION_ANALYSIS_SKIP_REASON_REPO_UNTRACKED_PROJECT means the session's
+ // project repo is untracked; re-admitted when the repo becomes tracked.
+ SESSION_ANALYSIS_SKIP_REASON_REPO_UNTRACKED_PROJECT = 5;
+}
+
+// CallStatus is the per-producer outcome recorded in CallState — whether a
+// judged producer (READ, EVIDENCE, DISCARD) ran for a session.
+enum CallStatus {
+ // CALL_STATUS_UNSPECIFIED means no status recorded for this producer yet.
+ CALL_STATUS_UNSPECIFIED = 0;
+ // CALL_STATUS_NOT_FIRED means the producer was conditional and had nothing to
+ // do for this session (e.g. an evidence pass with no evidence).
+ CALL_STATUS_NOT_FIRED = 1;
+ // CALL_STATUS_DONE means the producer ran and committed its grain.
+ CALL_STATUS_DONE = 2;
+ // CALL_STATUS_FAILED means the producer's inference errored.
+ CALL_STATUS_FAILED = 3;
+ // CALL_STATUS_SKIPPED means the producer was not applicable to this session
+ // for a non-flag reason.
+ CALL_STATUS_SKIPPED = 4;
+ // CALL_STATUS_FLAG_SKIPPED means the producer's rollout flag was off, so its
+ // inference never ran; category 9 re-admits the row when the flag turns on.
+ CALL_STATUS_FLAG_SKIPPED = 5;
+ // CALL_STATUS_SKIPPED_PENDING_DATA means the producer fired but an input
+ // dependency was not yet resolvable (an artifact whose intent the classify
+ // sweep has not reached), so it committed no judged grain and is
+ // re-admittable: the scan re-picks the row via the pending_data_producers bit
+ // and a cheap intent read until the data resolves or the source body changes
+ //. Distinct from CALL_STATUS_SKIPPED, which is
+ // a settled non-flag absence that is never re-admitted on data arrival.
+ CALL_STATUS_SKIPPED_PENDING_DATA = 6;
+}
+
+// JudgedDisposition records how the judged tier resolved, stamped alongside
+// judged_at. All three still enter measured aggregates via NULL-tolerant
+// per-field averaging.
+enum JudgedDisposition {
+ // JUDGED_DISPOSITION_UNSPECIFIED means the judged tier has not resolved yet.
+ JUDGED_DISPOSITION_UNSPECIFIED = 0;
+ // JUDGED_DISPOSITION_PRODUCED means every enabled producer ran.
+ JUDGED_DISPOSITION_PRODUCED = 1;
+ // JUDGED_DISPOSITION_PARTIAL means at least one producer was FLAG_SKIPPED, so
+ // some judged columns are legitimately NULL.
+ JUDGED_DISPOSITION_PARTIAL = 2;
+ // JUDGED_DISPOSITION_NOT_APPLICABLE means thin-capture: no judged grain could
+ // be produced.
+ JUDGED_DISPOSITION_NOT_APPLICABLE = 3;
+ // JUDGED_DISPOSITION_JUDGE_FAILED means R's terminal failure stamped judged_at
+ // over the measured row already written at spine_done: the measured cost/token
+ // columns serve through the ordinary NULL-tolerant path, while every judged
+ // column stays NULL and so never enters the score/verdict/waste aggregates
+ //.
+ JUDGED_DISPOSITION_JUDGE_FAILED = 4;
+}
+
+// ProducerReadiness is the per-producer(-half) resolution state stamped on
+// session_analyses beside judged_disposition:
+// discard_disposition and the two E-half columns (evidence_artifact_disposition,
+// evidence_roundtrip_disposition) all share this vocabulary.
+enum ProducerReadiness {
+ // PRODUCER_READINESS_UNSPECIFIED means no readiness recorded yet (the producer
+ // has not committed for this generation).
+ PRODUCER_READINESS_UNSPECIFIED = 0;
+ // PRODUCER_READINESS_PRODUCED means the half resolved and committed its output.
+ PRODUCER_READINESS_PRODUCED = 1;
+ // PRODUCER_READINESS_SKIPPED_PENDING_DATA means the half fired but its input is
+ // not yet resolvable (e.g. E's artifact half awaiting harness-intent
+ // classification); it is re-admittable and re-evaluated once the data lands.
+ PRODUCER_READINESS_SKIPPED_PENDING_DATA = 2;
+ // PRODUCER_READINESS_FAILED means the half exhausted its retry cap without
+ // producing valid output for this content — terminal until a content change
+ // re-admits it.
+ PRODUCER_READINESS_FAILED = 3;
+ // PRODUCER_READINESS_NOT_APPLICABLE means the half ran and found nothing to
+ // adjudicate (a settled, complete absence — e.g. no evidence for E, no
+ // revert/abandon signal for D) rather than a pending or failed state.
+ PRODUCER_READINESS_NOT_APPLICABLE = 4;
+}
+
+// ── Capabilities (what a session's capture supports) ──
+
+// TokenSplitCapability grades how completely the capture reports the token
+// input/output/cache split.
+enum TokenSplitCapability {
+ // TOKEN_SPLIT_CAPABILITY_UNSPECIFIED means capability not assessed.
+ TOKEN_SPLIT_CAPABILITY_UNSPECIFIED = 0;
+ // TOKEN_SPLIT_CAPABILITY_FULL means the complete split is reported.
+ TOKEN_SPLIT_CAPABILITY_FULL = 1;
+ // TOKEN_SPLIT_CAPABILITY_PARTIAL means some split fields are reported.
+ TOKEN_SPLIT_CAPABILITY_PARTIAL = 2;
+ // TOKEN_SPLIT_CAPABILITY_NONE means no split is reported.
+ TOKEN_SPLIT_CAPABILITY_NONE = 3;
+ // TOKEN_SPLIT_CAPABILITY_ESTIMATED means the split is estimated, not measured.
+ TOKEN_SPLIT_CAPABILITY_ESTIMATED = 4;
+}
+
+// ToolOutcomeCapability grades how a session's capture reports tool-call
+// outcomes.
+enum ToolOutcomeCapability {
+ // TOOL_OUTCOME_CAPABILITY_UNSPECIFIED means capability not assessed.
+ TOOL_OUTCOME_CAPABILITY_UNSPECIFIED = 0;
+ // TOOL_OUTCOME_CAPABILITY_TYPED means per-call typed outcomes are reported.
+ TOOL_OUTCOME_CAPABILITY_TYPED = 1;
+ // TOOL_OUTCOME_CAPABILITY_AGGREGATE means only aggregate tool counts exist.
+ TOOL_OUTCOME_CAPABILITY_AGGREGATE = 2;
+ // TOOL_OUTCOME_CAPABILITY_NONE means no tool outcomes are reported.
+ TOOL_OUTCOME_CAPABILITY_NONE = 3;
+}
+
+// ReasoningTraceCapability grades how a session's capture exposes the model's
+// reasoning trace.
+enum ReasoningTraceCapability {
+ // REASONING_TRACE_CAPABILITY_UNSPECIFIED means capability not assessed.
+ REASONING_TRACE_CAPABILITY_UNSPECIFIED = 0;
+ // REASONING_TRACE_CAPABILITY_FULL means the full reasoning trace is available.
+ REASONING_TRACE_CAPABILITY_FULL = 1;
+ // REASONING_TRACE_CAPABILITY_REDACTED means the trace is present but redacted.
+ REASONING_TRACE_CAPABILITY_REDACTED = 2;
+ // REASONING_TRACE_CAPABILITY_NONE means no reasoning trace is available.
+ REASONING_TRACE_CAPABILITY_NONE = 3;
+}
+
+// AssistantTextCapability grades how completely the assistant's own text is
+// captured for a session.
+enum AssistantTextCapability {
+ // ASSISTANT_TEXT_CAPABILITY_UNSPECIFIED means capability not assessed.
+ ASSISTANT_TEXT_CAPABILITY_UNSPECIFIED = 0;
+ // ASSISTANT_TEXT_CAPABILITY_FULL means assistant text is fully captured.
+ ASSISTANT_TEXT_CAPABILITY_FULL = 1;
+ // ASSISTANT_TEXT_CAPABILITY_PARTIAL means assistant text is partly captured.
+ ASSISTANT_TEXT_CAPABILITY_PARTIAL = 2;
+ // ASSISTANT_TEXT_CAPABILITY_NONE means assistant text is not captured.
+ ASSISTANT_TEXT_CAPABILITY_NONE = 3;
+}
+
+// ── Session verdict ──
+
+// SessionSteering grades how actively the human steered the session overall.
+enum SessionSteering {
+ // SESSION_STEERING_UNSPECIFIED means not judged.
+ SESSION_STEERING_UNSPECIFIED = 0;
+ // SESSION_STEERING_MOSTLY_ACTIVE means the human drove almost throughout.
+ SESSION_STEERING_MOSTLY_ACTIVE = 1;
+ // SESSION_STEERING_ACTIVE means the human steered actively.
+ SESSION_STEERING_ACTIVE = 2;
+ // SESSION_STEERING_MIDDLING means steering was mixed.
+ SESSION_STEERING_MIDDLING = 3;
+ // SESSION_STEERING_SLIGHTLY_PASSIVE means the human mostly let the agent run.
+ SESSION_STEERING_SLIGHTLY_PASSIVE = 4;
+ // SESSION_STEERING_MOSTLY_PASSIVE means the human barely steered.
+ SESSION_STEERING_MOSTLY_PASSIVE = 5;
+}
+
+// GoalAchieved grades how fully the session met its goal.
+enum GoalAchieved {
+ // GOAL_ACHIEVED_UNSPECIFIED means not judged.
+ GOAL_ACHIEVED_UNSPECIFIED = 0;
+ // GOAL_ACHIEVED_FULLY means the goal was fully met.
+ GOAL_ACHIEVED_FULLY = 1;
+ // GOAL_ACHIEVED_SOMEWHAT means the goal was largely met.
+ GOAL_ACHIEVED_SOMEWHAT = 2;
+ // GOAL_ACHIEVED_PARTIALLY means the goal was partly met.
+ GOAL_ACHIEVED_PARTIALLY = 3;
+ // GOAL_ACHIEVED_BARELY means little of the goal was met.
+ GOAL_ACHIEVED_BARELY = 4;
+ // GOAL_ACHIEVED_NO means the goal was not met.
+ GOAL_ACHIEVED_NO = 5;
+}
+
+// Smoothness grades how friction-free the session (or phase) felt.
+enum Smoothness {
+ // SMOOTHNESS_UNSPECIFIED means not judged.
+ SMOOTHNESS_UNSPECIFIED = 0;
+ // SMOOTHNESS_SMOOTH means the work flowed without notable friction.
+ SMOOTHNESS_SMOOTH = 1;
+ // SMOOTHNESS_SOME_FRICTION means occasional friction slowed the work.
+ SMOOTHNESS_SOME_FRICTION = 2;
+ // SMOOTHNESS_ROUGH means friction dominated.
+ SMOOTHNESS_ROUGH = 3;
+ // SMOOTHNESS_UNCLEAR means smoothness could not be determined.
+ SMOOTHNESS_UNCLEAR = 4;
+}
+
+// FrictionCause attributes the dominant source of friction in a session or
+// phase.
+enum FrictionCause {
+ // FRICTION_CAUSE_UNSPECIFIED means not judged.
+ FRICTION_CAUSE_UNSPECIFIED = 0;
+ // FRICTION_CAUSE_NONE means no notable friction occurred.
+ FRICTION_CAUSE_NONE = 1;
+ // FRICTION_CAUSE_HARNESS means the harness (tools/config) caused the friction.
+ FRICTION_CAUSE_HARNESS = 2;
+ // FRICTION_CAUSE_MODEL means the model's behaviour caused the friction.
+ FRICTION_CAUSE_MODEL = 3;
+ // FRICTION_CAUSE_PROMPT means the human's prompting caused the friction.
+ FRICTION_CAUSE_PROMPT = 4;
+ // FRICTION_CAUSE_APPROACH means the chosen approach caused the friction.
+ FRICTION_CAUSE_APPROACH = 5;
+ // FRICTION_CAUSE_UNKNOWN means friction occurred but its cause is unclear.
+ FRICTION_CAUSE_UNKNOWN = 6;
+}
+
+// Speed grades the session's perceived pace.
+enum Speed {
+ // SPEED_UNSPECIFIED means not judged.
+ SPEED_UNSPECIFIED = 0;
+ // SPEED_FAST means the work moved quickly.
+ SPEED_FAST = 1;
+ // SPEED_SLOW means the work moved slowly.
+ SPEED_SLOW = 2;
+ // SPEED_UNKNOWN means pace could not be determined.
+ SPEED_UNKNOWN = 3;
+}
+
+// TokenEfficiency grades how economically the session spent tokens.
+enum TokenEfficiency {
+ // TOKEN_EFFICIENCY_UNSPECIFIED means not judged.
+ TOKEN_EFFICIENCY_UNSPECIFIED = 0;
+ // TOKEN_EFFICIENCY_EFFICIENT means tokens were spent economically.
+ TOKEN_EFFICIENCY_EFFICIENT = 1;
+ // TOKEN_EFFICIENCY_WASTEFUL means tokens were spent wastefully.
+ TOKEN_EFFICIENCY_WASTEFUL = 2;
+ // TOKEN_EFFICIENCY_UNKNOWN means efficiency could not be determined.
+ TOKEN_EFFICIENCY_UNKNOWN = 3;
+}
+
+// ── Turn ──
+
+// PromptType classifies what a single human turn was asking for.
+enum PromptType {
+ // PROMPT_TYPE_UNSPECIFIED means not classified.
+ PROMPT_TYPE_UNSPECIFIED = 0;
+ // PROMPT_TYPE_EXPLORATION_ASK means an open-ended exploratory question.
+ PROMPT_TYPE_EXPLORATION_ASK = 1;
+ // PROMPT_TYPE_PLANNING means a request to plan or design.
+ PROMPT_TYPE_PLANNING = 2;
+ // PROMPT_TYPE_DECISION_MAKING means a request to choose between options.
+ PROMPT_TYPE_DECISION_MAKING = 3;
+ // PROMPT_TYPE_CREATION means a request to produce an artifact (code, doc).
+ PROMPT_TYPE_CREATION = 4;
+ // PROMPT_TYPE_REVIEW means a request to review or critique.
+ PROMPT_TYPE_REVIEW = 5;
+ // PROMPT_TYPE_OPERATIONAL_ASK means a request to run/operate something.
+ PROMPT_TYPE_OPERATIONAL_ASK = 6;
+ // PROMPT_TYPE_CONTEXT_ENRICHMENT means the turn supplied context, not a task.
+ PROMPT_TYPE_CONTEXT_ENRICHMENT = 7;
+ // PROMPT_TYPE_DATA_QUERY means a request to fetch or look up data.
+ PROMPT_TYPE_DATA_QUERY = 8;
+ // PROMPT_TYPE_STATUS_UPDATE means a status/acknowledgement turn.
+ PROMPT_TYPE_STATUS_UPDATE = 9;
+ // PROMPT_TYPE_TRIVIAL means a trivial or filler turn.
+ PROMPT_TYPE_TRIVIAL = 10;
+}
+
+// TurnUserSteering grades how the human steered within a single turn.
+enum TurnUserSteering {
+ // TURN_USER_STEERING_UNSPECIFIED means not judged.
+ TURN_USER_STEERING_UNSPECIFIED = 0;
+ // TURN_USER_STEERING_ACTIVE means the human actively directed the turn.
+ TURN_USER_STEERING_ACTIVE = 1;
+ // TURN_USER_STEERING_CORRECTING means the human corrected the agent.
+ TURN_USER_STEERING_CORRECTING = 2;
+ // TURN_USER_STEERING_PASSIVE means the human let the agent proceed.
+ TURN_USER_STEERING_PASSIVE = 3;
+}
+
+// PromptCompleteness grades how completely a prompt stated what it needed.
+enum PromptCompleteness {
+ // PROMPT_COMPLETENESS_UNSPECIFIED means not judged.
+ PROMPT_COMPLETENESS_UNSPECIFIED = 0;
+ // PROMPT_COMPLETENESS_COMPLETE means the prompt was self-sufficient.
+ PROMPT_COMPLETENESS_COMPLETE = 1;
+ // PROMPT_COMPLETENESS_MISSING_INFO means the prompt omitted needed info.
+ PROMPT_COMPLETENESS_MISSING_INFO = 2;
+ // PROMPT_COMPLETENESS_AMBIGUOUS means the prompt was ambiguous.
+ PROMPT_COMPLETENESS_AMBIGUOUS = 3;
+ // PROMPT_COMPLETENESS_NOT_APPLICABLE means completeness does not apply.
+ PROMPT_COMPLETENESS_NOT_APPLICABLE = 4;
+ // PROMPT_COMPLETENESS_UNRESOLVED means completeness could not be determined.
+ PROMPT_COMPLETENESS_UNRESOLVED = 5;
+}
+
+// PromptObjectiveMet grades whether the turn met its own objective.
+enum PromptObjectiveMet {
+ // PROMPT_OBJECTIVE_MET_UNSPECIFIED means not judged.
+ PROMPT_OBJECTIVE_MET_UNSPECIFIED = 0;
+ // PROMPT_OBJECTIVE_MET_MET means the objective was met.
+ PROMPT_OBJECTIVE_MET_MET = 1;
+ // PROMPT_OBJECTIVE_MET_PARTIALLY_MET means the objective was partly met.
+ PROMPT_OBJECTIVE_MET_PARTIALLY_MET = 2;
+ // PROMPT_OBJECTIVE_MET_NOT_MET means the objective was not met.
+ PROMPT_OBJECTIVE_MET_NOT_MET = 3;
+ // PROMPT_OBJECTIVE_MET_UNCLEAR means it could not be determined.
+ PROMPT_OBJECTIVE_MET_UNCLEAR = 4;
+ // PROMPT_OBJECTIVE_MET_NOT_APPLICABLE means the turn had no objective to meet.
+ PROMPT_OBJECTIVE_MET_NOT_APPLICABLE = 5;
+}
+
+// AgentHelpfulness grades how helpful the agent's response was in a turn or
+// phase.
+enum AgentHelpfulness {
+ // AGENT_HELPFULNESS_UNSPECIFIED means not judged.
+ AGENT_HELPFULNESS_UNSPECIFIED = 0;
+ // AGENT_HELPFULNESS_HELPFUL means the response was helpful.
+ AGENT_HELPFULNESS_HELPFUL = 1;
+ // AGENT_HELPFULNESS_PARTIALLY_HELPFUL means the response was partly helpful.
+ AGENT_HELPFULNESS_PARTIALLY_HELPFUL = 2;
+ // AGENT_HELPFULNESS_UNHELPFUL means the response was unhelpful.
+ AGENT_HELPFULNESS_UNHELPFUL = 3;
+ // AGENT_HELPFULNESS_BLOCKED_BY_LIMITATION means a tool/model limitation
+ // blocked the agent from helping.
+ AGENT_HELPFULNESS_BLOCKED_BY_LIMITATION = 4;
+ // AGENT_HELPFULNESS_UNCLEAR means helpfulness could not be determined.
+ AGENT_HELPFULNESS_UNCLEAR = 5;
+}
+
+// AgentInitiative grades how the agent handled the gap between spec and action.
+enum AgentInitiative {
+ // AGENT_INITIATIVE_UNSPECIFIED means not judged.
+ AGENT_INITIATIVE_UNSPECIFIED = 0;
+ // AGENT_INITIATIVE_FOLLOWED_SPEC means the agent followed the stated spec.
+ AGENT_INITIATIVE_FOLLOWED_SPEC = 1;
+ // AGENT_INITIATIVE_ASKED_TO_CONFIRM means the agent paused to confirm.
+ AGENT_INITIATIVE_ASKED_TO_CONFIRM = 2;
+ // AGENT_INITIATIVE_REFUSED_TO_PROCEED means the agent declined to proceed.
+ AGENT_INITIATIVE_REFUSED_TO_PROCEED = 3;
+ // AGENT_INITIATIVE_ASSUMED_AND_PROCEEDED means the agent assumed and acted.
+ AGENT_INITIATIVE_ASSUMED_AND_PROCEEDED = 4;
+ // AGENT_INITIATIVE_UNCLEAR means initiative could not be determined.
+ AGENT_INITIATIVE_UNCLEAR = 5;
+}
+
+// ToolUse grades whether the agent used tools appropriately in a turn.
+enum ToolUse {
+ // TOOL_USE_UNSPECIFIED means not judged.
+ TOOL_USE_UNSPECIFIED = 0;
+ // TOOL_USE_APPROPRIATE means tools were used appropriately.
+ TOOL_USE_APPROPRIATE = 1;
+ // TOOL_USE_SKILL_SHOULD_HAVE_BEEN_USED means a skill/command would have fit
+ // better than the ad-hoc tool use.
+ TOOL_USE_SKILL_SHOULD_HAVE_BEEN_USED = 2;
+ // TOOL_USE_INADEQUATE means tool use fell short of what the turn needed.
+ TOOL_USE_INADEQUATE = 3;
+ // TOOL_USE_OVERUSED means tools were used more than necessary.
+ TOOL_USE_OVERUSED = 4;
+ // TOOL_USE_UNCLEAR means tool-use adequacy could not be determined.
+ TOOL_USE_UNCLEAR = 5;
+}
+
+// WasRetry classifies whether a turn retried an earlier attempt.
+enum WasRetry {
+ // WAS_RETRY_UNSPECIFIED means not classified.
+ WAS_RETRY_UNSPECIFIED = 0;
+ // WAS_RETRY_FRESH means a new attempt, not a retry.
+ WAS_RETRY_FRESH = 1;
+ // WAS_RETRY_RETRY_SAME means a retry of the same request unchanged.
+ WAS_RETRY_RETRY_SAME = 2;
+ // WAS_RETRY_RETRY_REFINED means a retry with a refined request.
+ WAS_RETRY_RETRY_REFINED = 3;
+}
+
+// FailureClass classifies the nature of a turn's failure.
+enum FailureClass {
+ // FAILURE_CLASS_UNSPECIFIED means not classified.
+ FAILURE_CLASS_UNSPECIFIED = 0;
+ // FAILURE_CLASS_NONE means the turn did not fail.
+ FAILURE_CLASS_NONE = 1;
+ // FAILURE_CLASS_TRANSIENT means a transient failure (retryable).
+ FAILURE_CLASS_TRANSIENT = 2;
+ // FAILURE_CLASS_HARD means a hard failure (not retryable as-is).
+ FAILURE_CLASS_HARD = 3;
+}
+
+// TokenLocus attributes where a turn's tokens were spent. The model emits the
+// five judged loci; code stamps HUMAN_INPUT and TOOL_RESULTS.
+enum TokenLocus {
+ // TOKEN_LOCUS_UNSPECIFIED means not attributed.
+ TOKEN_LOCUS_UNSPECIFIED = 0;
+ // TOKEN_LOCUS_HUMAN_INPUT means tokens spent on the human's input
+ // (code-stamped).
+ TOKEN_LOCUS_HUMAN_INPUT = 1;
+ // TOKEN_LOCUS_AGENT_REASONING means tokens spent on the agent's reasoning.
+ TOKEN_LOCUS_AGENT_REASONING = 2;
+ // TOKEN_LOCUS_TOOL_RESULTS means tokens spent carrying tool results
+ // (code-stamped).
+ TOKEN_LOCUS_TOOL_RESULTS = 3;
+ // TOKEN_LOCUS_CONTEXT_REESTABLISHMENT means tokens spent re-establishing
+ // context (e.g. after compaction).
+ TOKEN_LOCUS_CONTEXT_REESTABLISHMENT = 4;
+ // TOKEN_LOCUS_SUBAGENT_FANOUT means tokens spent on delegated subagents.
+ TOKEN_LOCUS_SUBAGENT_FANOUT = 5;
+ // TOKEN_LOCUS_RETRY means tokens spent on retries.
+ TOKEN_LOCUS_RETRY = 6;
+ // TOKEN_LOCUS_UNKNOWN means the locus could not be determined.
+ TOKEN_LOCUS_UNKNOWN = 7;
+}
+
+// WasteCause attributes why a turn wasted tokens.
+enum WasteCause {
+ // WASTE_CAUSE_UNSPECIFIED means not attributed.
+ WASTE_CAUSE_UNSPECIFIED = 0;
+ // WASTE_CAUSE_NONE means no waste occurred.
+ WASTE_CAUSE_NONE = 1;
+ // WASTE_CAUSE_REDUNDANT_REREAD means the same content was re-read needlessly.
+ WASTE_CAUSE_REDUNDANT_REREAD = 2;
+ // WASTE_CAUSE_OVER_FETCH means more context was fetched than needed.
+ WASTE_CAUSE_OVER_FETCH = 3;
+ // WASTE_CAUSE_WRONG_MODEL_TIER means an over-powered model tier was used.
+ WASTE_CAUSE_WRONG_MODEL_TIER = 4;
+ // WASTE_CAUSE_POOR_DECOMPOSITION means poor task decomposition wasted tokens.
+ WASTE_CAUSE_POOR_DECOMPOSITION = 5;
+ // WASTE_CAUSE_MISSING_MEMORY means absent memory forced re-derivation.
+ WASTE_CAUSE_MISSING_MEMORY = 6;
+}
+
+// DecisionType classifies the kind of decision a turn made.
+enum DecisionType {
+ // DECISION_TYPE_UNSPECIFIED means not classified.
+ DECISION_TYPE_UNSPECIFIED = 0;
+ // DECISION_TYPE_APPROACH means a decision about the overall approach.
+ DECISION_TYPE_APPROACH = 1;
+ // DECISION_TYPE_API_OR_LIBRARY means a choice of API or library.
+ DECISION_TYPE_API_OR_LIBRARY = 2;
+ // DECISION_TYPE_DATA_SHAPE means a decision about data shape or schema.
+ DECISION_TYPE_DATA_SHAPE = 3;
+ // DECISION_TYPE_SCOPE_BOUNDARY means a decision about scope boundaries.
+ DECISION_TYPE_SCOPE_BOUNDARY = 4;
+ // DECISION_TYPE_INTENT_ASSUMPTION means an assumption about intent.
+ DECISION_TYPE_INTENT_ASSUMPTION = 5;
+}
+
+// DownstreamImpact classifies how a turn's decision affected later work.
+enum DownstreamImpact {
+ // DOWNSTREAM_IMPACT_UNSPECIFIED means not classified.
+ DOWNSTREAM_IMPACT_UNSPECIFIED = 0;
+ // DOWNSTREAM_IMPACT_BUILT_ON means later work built on it.
+ DOWNSTREAM_IMPACT_BUILT_ON = 1;
+ // DOWNSTREAM_IMPACT_BENIGN means it had no material downstream effect.
+ DOWNSTREAM_IMPACT_BENIGN = 2;
+ // DOWNSTREAM_IMPACT_CORRECTED means later work corrected it.
+ DOWNSTREAM_IMPACT_CORRECTED = 3;
+ // DOWNSTREAM_IMPACT_DRIFTED means later work drifted because of it.
+ DOWNSTREAM_IMPACT_DRIFTED = 4;
+ // DOWNSTREAM_IMPACT_UNKNOWN means the downstream impact is unclear.
+ DOWNSTREAM_IMPACT_UNKNOWN = 5;
+}
+
+// FeedbackTarget classifies what a human's feedback turn was aimed at.
+enum FeedbackTarget {
+ // FEEDBACK_TARGET_UNSPECIFIED means not classified.
+ FEEDBACK_TARGET_UNSPECIFIED = 0;
+ // FEEDBACK_TARGET_ARTIFACT means feedback on a produced artifact.
+ FEEDBACK_TARGET_ARTIFACT = 1;
+ // FEEDBACK_TARGET_REVIEW_FINDING means feedback on a review finding.
+ FEEDBACK_TARGET_REVIEW_FINDING = 2;
+ // FEEDBACK_TARGET_BOTH means feedback on both artifact and finding.
+ FEEDBACK_TARGET_BOTH = 3;
+ // FEEDBACK_TARGET_PROCESS means feedback on the process itself.
+ FEEDBACK_TARGET_PROCESS = 4;
+}
+
+// FeedbackDisposition classifies how the agent handled human feedback.
+enum FeedbackDisposition {
+ // FEEDBACK_DISPOSITION_UNSPECIFIED means not classified.
+ FEEDBACK_DISPOSITION_UNSPECIFIED = 0;
+ // FEEDBACK_DISPOSITION_ACCEPT means the feedback was accepted.
+ FEEDBACK_DISPOSITION_ACCEPT = 1;
+ // FEEDBACK_DISPOSITION_REJECT means the feedback was rejected.
+ FEEDBACK_DISPOSITION_REJECT = 2;
+ // FEEDBACK_DISPOSITION_REFINE means the feedback led to a refinement.
+ FEEDBACK_DISPOSITION_REFINE = 3;
+ // FEEDBACK_DISPOSITION_DEFER means the feedback was deferred.
+ FEEDBACK_DISPOSITION_DEFER = 4;
+ // FEEDBACK_DISPOSITION_REQUEST_RETRY means a retry was requested.
+ FEEDBACK_DISPOSITION_REQUEST_RETRY = 5;
+ // FEEDBACK_DISPOSITION_UNCLEAR means the disposition could not be determined.
+ FEEDBACK_DISPOSITION_UNCLEAR = 6;
+}
+
+// RoundTripFault attributes fault for a human→agent→human correction round
+// trip.
+enum RoundTripFault {
+ // ROUND_TRIP_FAULT_UNSPECIFIED means not judged.
+ ROUND_TRIP_FAULT_UNSPECIFIED = 0;
+ // ROUND_TRIP_FAULT_PROMPT means the human's prompt was at fault.
+ ROUND_TRIP_FAULT_PROMPT = 1;
+ // ROUND_TRIP_FAULT_AGENT means the agent was at fault.
+ ROUND_TRIP_FAULT_AGENT = 2;
+ // ROUND_TRIP_FAULT_TASTE means a taste/preference mismatch, not an error.
+ ROUND_TRIP_FAULT_TASTE = 3;
+ // ROUND_TRIP_FAULT_MIXED means fault was shared.
+ ROUND_TRIP_FAULT_MIXED = 4;
+ // ROUND_TRIP_FAULT_UNCLEAR means fault could not be determined.
+ ROUND_TRIP_FAULT_UNCLEAR = 5;
+ // ROUND_TRIP_FAULT_NO_ROUND_TRIP means there was no correction round trip.
+ ROUND_TRIP_FAULT_NO_ROUND_TRIP = 6;
+}
+
+// PromptOrigination classifies who originated a turn, derived from
+// SessionEventAuthor.
+enum PromptOrigination {
+ // PROMPT_ORIGINATION_UNSPECIFIED means not classified.
+ PROMPT_ORIGINATION_UNSPECIFIED = 0;
+ // PROMPT_ORIGINATION_HUMAN means a human authored the prompt.
+ PROMPT_ORIGINATION_HUMAN = 1;
+ // PROMPT_ORIGINATION_AGENT_DRIVEN means the agent drove the prompt.
+ PROMPT_ORIGINATION_AGENT_DRIVEN = 2;
+ // PROMPT_ORIGINATION_HARNESS_INJECTED means the harness injected the prompt;
+ // no capture source distinguishes it from AGENT_DRIVEN, so it is not produced
+ // in v1.
+ PROMPT_ORIGINATION_HARNESS_INJECTED = 3;
+}
+
+// ── Issues ──
+
+// PromptIssueSlug is the closed vocabulary of prompt-quality issues a turn can
+// carry, including the security-leak markers.
+enum PromptIssueSlug {
+ // PROMPT_ISSUE_SLUG_UNSPECIFIED means no issue slug recorded.
+ PROMPT_ISSUE_SLUG_UNSPECIFIED = 0;
+ // PROMPT_ISSUE_SLUG_AMBIGUOUS_DIRECTIVE means the directive was ambiguous.
+ PROMPT_ISSUE_SLUG_AMBIGUOUS_DIRECTIVE = 1;
+ // PROMPT_ISSUE_SLUG_MISSING_STATE_DELTA means the prompt omitted the state
+ // change it expected.
+ PROMPT_ISSUE_SLUG_MISSING_STATE_DELTA = 2;
+ // PROMPT_ISSUE_SLUG_UNSPECIFIED_OUTPUT means the desired output was not
+ // specified.
+ PROMPT_ISSUE_SLUG_UNSPECIFIED_OUTPUT = 3;
+ // PROMPT_ISSUE_SLUG_MISSING_INTERNAL_CONTEXT means needed internal context
+ // was missing.
+ PROMPT_ISSUE_SLUG_MISSING_INTERNAL_CONTEXT = 4;
+ // PROMPT_ISSUE_SLUG_MISSING_EXTERNAL_ENVIRONMENT means needed external
+ // environment detail was missing.
+ PROMPT_ISSUE_SLUG_MISSING_EXTERNAL_ENVIRONMENT = 5;
+ // PROMPT_ISSUE_SLUG_EXCESSIVE_NOISE means the prompt carried excessive noise.
+ PROMPT_ISSUE_SLUG_EXCESSIVE_NOISE = 6;
+ // PROMPT_ISSUE_SLUG_MISSING_CONSTRAINTS means needed constraints were missing.
+ PROMPT_ISSUE_SLUG_MISSING_CONSTRAINTS = 7;
+ // PROMPT_ISSUE_SLUG_TOKEN_WASTE means the prompt wasted tokens.
+ PROMPT_ISSUE_SLUG_TOKEN_WASTE = 8;
+ // PROMPT_ISSUE_SLUG_CONTEXT_CONFLICT means the prompt conflicted with existing
+ // context.
+ PROMPT_ISSUE_SLUG_CONTEXT_CONFLICT = 9;
+ // PROMPT_ISSUE_SLUG_API_KEY_LEAK means an API key was leaked in the prompt.
+ PROMPT_ISSUE_SLUG_API_KEY_LEAK = 10;
+ // PROMPT_ISSUE_SLUG_DB_CREDENTIAL_LEAK means a DB credential was leaked.
+ PROMPT_ISSUE_SLUG_DB_CREDENTIAL_LEAK = 11;
+ // PROMPT_ISSUE_SLUG_PII_INJECTION means PII was injected into the prompt.
+ PROMPT_ISSUE_SLUG_PII_INJECTION = 12;
+}
+
+// IssueSeverity grades the severity of a PromptIssue.
+enum IssueSeverity {
+ // ISSUE_SEVERITY_UNSPECIFIED means severity not assigned.
+ ISSUE_SEVERITY_UNSPECIFIED = 0;
+ // ISSUE_SEVERITY_LOW means a low-severity issue.
+ ISSUE_SEVERITY_LOW = 1;
+ // ISSUE_SEVERITY_MEDIUM means a medium-severity issue.
+ ISSUE_SEVERITY_MEDIUM = 2;
+ // ISSUE_SEVERITY_HIGH means a high-severity issue.
+ ISSUE_SEVERITY_HIGH = 3;
+ // ISSUE_SEVERITY_CRITICAL means a critical-severity issue.
+ ISSUE_SEVERITY_CRITICAL = 4;
+}
+
+// ── Phase ──
+
+// PhaseTheme is the kind of engineering work a phase (or, materialized, a
+// session's dominant phase) represents; also the value set of the work_type
+// column.
+enum PhaseTheme {
+ // PHASE_THEME_UNSPECIFIED means not classified.
+ PHASE_THEME_UNSPECIFIED = 0;
+ // PHASE_THEME_EXPLORATION means exploration/investigation work.
+ PHASE_THEME_EXPLORATION = 1;
+ // PHASE_THEME_PLANNING means planning/design work.
+ PHASE_THEME_PLANNING = 2;
+ // PHASE_THEME_CREATION means creating new artifacts.
+ PHASE_THEME_CREATION = 3;
+ // PHASE_THEME_CORRECTION means fixing or correcting work.
+ PHASE_THEME_CORRECTION = 4;
+ // PHASE_THEME_REFACTOR means refactoring existing work.
+ PHASE_THEME_REFACTOR = 5;
+ // PHASE_THEME_REVIEW means reviewing work.
+ PHASE_THEME_REVIEW = 6;
+ // PHASE_THEME_OPERATIONS means operational/run work.
+ PHASE_THEME_OPERATIONS = 7;
+}
+
+// SdlcStage names a software-development-lifecycle stage a phase maps onto.
+enum SdlcStage {
+ // SDLC_STAGE_UNSPECIFIED means not classified.
+ SDLC_STAGE_UNSPECIFIED = 0;
+ // SDLC_STAGE_PRODUCT_SPEC means the product-spec stage.
+ SDLC_STAGE_PRODUCT_SPEC = 1;
+ // SDLC_STAGE_TECH_SPEC means the tech-spec stage.
+ SDLC_STAGE_TECH_SPEC = 2;
+ // SDLC_STAGE_PLAN means the planning stage.
+ SDLC_STAGE_PLAN = 3;
+ // SDLC_STAGE_CODE means the coding stage.
+ SDLC_STAGE_CODE = 4;
+ // SDLC_STAGE_REVIEW means the review stage.
+ SDLC_STAGE_REVIEW = 5;
+ // SDLC_STAGE_TEST_AND_QA means the test-and-QA stage.
+ SDLC_STAGE_TEST_AND_QA = 6;
+ // SDLC_STAGE_CI_CD means the CI/CD stage.
+ SDLC_STAGE_CI_CD = 7;
+ // SDLC_STAGE_DEPLOY means the deploy stage.
+ SDLC_STAGE_DEPLOY = 8;
+ // SDLC_STAGE_OPERATE means the operate stage.
+ SDLC_STAGE_OPERATE = 9;
+}
+
+// TaskComplexity grades a phase's task complexity.
+enum TaskComplexity {
+ // TASK_COMPLEXITY_UNSPECIFIED means not judged.
+ TASK_COMPLEXITY_UNSPECIFIED = 0;
+ // TASK_COMPLEXITY_TRIVIAL means a trivial task.
+ TASK_COMPLEXITY_TRIVIAL = 1;
+ // TASK_COMPLEXITY_MODERATE means a moderate task.
+ TASK_COMPLEXITY_MODERATE = 2;
+ // TASK_COMPLEXITY_COMPLEX means a complex task.
+ TASK_COMPLEXITY_COMPLEX = 3;
+}
+
+// PhaseUserSteering grades how the human steered within a phase.
+enum PhaseUserSteering {
+ // PHASE_USER_STEERING_UNSPECIFIED means not judged.
+ PHASE_USER_STEERING_UNSPECIFIED = 0;
+ // PHASE_USER_STEERING_ACTIVE means the human actively steered the phase.
+ PHASE_USER_STEERING_ACTIVE = 1;
+ // PHASE_USER_STEERING_CORRECTING means the human corrected within the phase.
+ PHASE_USER_STEERING_CORRECTING = 2;
+ // PHASE_USER_STEERING_PASSIVE means the human let the agent run the phase.
+ PHASE_USER_STEERING_PASSIVE = 3;
+}
+
+// PhaseObjectiveMet grades whether a phase met its objective.
+enum PhaseObjectiveMet {
+ // PHASE_OBJECTIVE_MET_UNSPECIFIED means not judged.
+ PHASE_OBJECTIVE_MET_UNSPECIFIED = 0;
+ // PHASE_OBJECTIVE_MET_MET means the phase objective was met.
+ PHASE_OBJECTIVE_MET_MET = 1;
+ // PHASE_OBJECTIVE_MET_PARTIALLY_MET means it was partly met.
+ PHASE_OBJECTIVE_MET_PARTIALLY_MET = 2;
+ // PHASE_OBJECTIVE_MET_NOT_MET means it was not met.
+ PHASE_OBJECTIVE_MET_NOT_MET = 3;
+ // PHASE_OBJECTIVE_MET_UNCLEAR means it could not be determined.
+ PHASE_OBJECTIVE_MET_UNCLEAR = 4;
+}
+
+// HitlGate names the human-in-the-loop permission gate a phase ran under, derived per phase from the
+// per-turn permission mode captured on each turn and forward-filled to the phase's first turn.
+// Claude Code's permissionMode and Codex's approval_policy both map onto these members; UNSPECIFIED
+// means no source mode was captured for that phase (e.g. Kiro/Cursor, which stamp no per-turn mode,
+// or turns before the first stamped mode). It is a permission-placement signal, not evidence a human
+// reviewed anything — cross-agent comparison needs a crosswalk, as the two vocabularies differ.
+enum HitlGate {
+ // HITL_GATE_UNSPECIFIED means no gate recorded.
+ HITL_GATE_UNSPECIFIED = 0;
+ // HITL_GATE_DEFAULT means the default permission mode.
+ HITL_GATE_DEFAULT = 1;
+ // HITL_GATE_PLAN means plan mode (no edits until approved).
+ HITL_GATE_PLAN = 2;
+ // HITL_GATE_ACCEPT_EDITS means edits are auto-accepted.
+ HITL_GATE_ACCEPT_EDITS = 3;
+ // HITL_GATE_BYPASS_PERMISSIONS means permission prompts are bypassed.
+ HITL_GATE_BYPASS_PERMISSIONS = 4;
+}
+
+// CoachingLever names the lever a phase-level coaching suggestion pulls.
+enum CoachingLever {
+ // COACHING_LEVER_UNSPECIFIED means no lever assigned.
+ COACHING_LEVER_UNSPECIFIED = 0;
+ // COACHING_LEVER_PROMPTING means improving how the human prompts.
+ COACHING_LEVER_PROMPTING = 1;
+ // COACHING_LEVER_TOOL_USE means improving tool use.
+ COACHING_LEVER_TOOL_USE = 2;
+ // COACHING_LEVER_PLANNING means improving planning.
+ COACHING_LEVER_PLANNING = 3;
+ // COACHING_LEVER_DECOMPOSITION means improving task decomposition.
+ COACHING_LEVER_DECOMPOSITION = 4;
+ // COACHING_LEVER_SUBAGENTS means improving use of subagents.
+ COACHING_LEVER_SUBAGENTS = 5;
+ // COACHING_LEVER_SKILL_OR_COMMAND means using a skill/command instead.
+ COACHING_LEVER_SKILL_OR_COMMAND = 6;
+ // COACHING_LEVER_STEERING means improving how the human steers.
+ COACHING_LEVER_STEERING = 7;
+ // COACHING_LEVER_VERIFICATION means improving verification of outputs.
+ COACHING_LEVER_VERIFICATION = 8;
+}
+
+// CoachingAxis names the dimension a coaching suggestion aims to improve.
+enum CoachingAxis {
+ // COACHING_AXIS_UNSPECIFIED means no axis assigned.
+ COACHING_AXIS_UNSPECIFIED = 0;
+ // COACHING_AXIS_OUTPUT_QUALITY means the output-quality axis.
+ COACHING_AXIS_OUTPUT_QUALITY = 1;
+ // COACHING_AXIS_SPEED means the speed axis.
+ COACHING_AXIS_SPEED = 2;
+ // COACHING_AXIS_TOKENS means the token-cost axis.
+ COACHING_AXIS_TOKENS = 3;
+}
+
+// ── Artifact / skill adjudication (inside JSONB) ──
+
+// InputContract classifies what a skill needs from the human's input.
+enum InputContract {
+ // INPUT_CONTRACT_UNSPECIFIED means not classified.
+ INPUT_CONTRACT_UNSPECIFIED = 0;
+ // INPUT_CONTRACT_NONE means the skill needs no input from the human.
+ INPUT_CONTRACT_NONE = 1;
+ // INPUT_CONTRACT_TARGET means the skill needs a target to act on.
+ INPUT_CONTRACT_TARGET = 2;
+ // INPUT_CONTRACT_TASK means the skill needs a full task description.
+ INPUT_CONTRACT_TASK = 3;
+}
+
+// ContractCompliance grades whether a skill met its input contract.
+enum ContractCompliance {
+ // CONTRACT_COMPLIANCE_UNSPECIFIED means not judged.
+ CONTRACT_COMPLIANCE_UNSPECIFIED = 0;
+ // CONTRACT_COMPLIANCE_ADEQUATE means the contract was met adequately.
+ CONTRACT_COMPLIANCE_ADEQUATE = 1;
+ // CONTRACT_COMPLIANCE_INADEQUATE means the contract was not met.
+ CONTRACT_COMPLIANCE_INADEQUATE = 2;
+ // CONTRACT_COMPLIANCE_UNRESOLVED means compliance could not be determined.
+ CONTRACT_COMPLIANCE_UNRESOLVED = 3;
+}
+
+// OutputQuality grades a skill's output quality.
+enum OutputQuality {
+ // OUTPUT_QUALITY_UNSPECIFIED means not judged.
+ OUTPUT_QUALITY_UNSPECIFIED = 0;
+ // OUTPUT_QUALITY_ADEQUATE means the output was adequate.
+ OUTPUT_QUALITY_ADEQUATE = 1;
+ // OUTPUT_QUALITY_INADEQUATE means the output was inadequate.
+ OUTPUT_QUALITY_INADEQUATE = 2;
+ // OUTPUT_QUALITY_UNRESOLVED means quality could not be determined.
+ OUTPUT_QUALITY_UNRESOLVED = 3;
+}
+
+// SkillVerdict is the overall verdict on a skill's contribution.
+enum SkillVerdict {
+ // SKILL_VERDICT_UNSPECIFIED means not judged.
+ SKILL_VERDICT_UNSPECIFIED = 0;
+ // SKILL_VERDICT_ADEQUATE means the skill's contribution was adequate.
+ SKILL_VERDICT_ADEQUATE = 1;
+ // SKILL_VERDICT_INADEQUATE means the skill's contribution was inadequate.
+ SKILL_VERDICT_INADEQUATE = 2;
+ // SKILL_VERDICT_UNRESOLVED means the verdict could not be determined.
+ SKILL_VERDICT_UNRESOLVED = 3;
+}
+
+// ExecutionReliability grades how reliably a skill executed.
+enum ExecutionReliability {
+ // EXECUTION_RELIABILITY_UNSPECIFIED means not judged.
+ EXECUTION_RELIABILITY_UNSPECIFIED = 0;
+ // EXECUTION_RELIABILITY_CLEAN means it executed cleanly.
+ EXECUTION_RELIABILITY_CLEAN = 1;
+ // EXECUTION_RELIABILITY_RECOVERED_WITH_FRICTION means it recovered after
+ // friction.
+ EXECUTION_RELIABILITY_RECOVERED_WITH_FRICTION = 2;
+ // EXECUTION_RELIABILITY_FAILED means it failed to execute.
+ EXECUTION_RELIABILITY_FAILED = 3;
+ // EXECUTION_RELIABILITY_UNRESOLVED means reliability could not be determined.
+ EXECUTION_RELIABILITY_UNRESOLVED = 4;
+}
+
+// HumanAlignment grades how the human responded to a skill's output.
+enum HumanAlignment {
+ // HUMAN_ALIGNMENT_UNSPECIFIED means not judged.
+ HUMAN_ALIGNMENT_UNSPECIFIED = 0;
+ // HUMAN_ALIGNMENT_ALIGNED means the human accepted it as-is.
+ HUMAN_ALIGNMENT_ALIGNED = 1;
+ // HUMAN_ALIGNMENT_CORRECTED means the human corrected it.
+ HUMAN_ALIGNMENT_CORRECTED = 2;
+ // HUMAN_ALIGNMENT_DISPUTED means the human disputed it.
+ HUMAN_ALIGNMENT_DISPUTED = 3;
+ // HUMAN_ALIGNMENT_UNRESOLVED means alignment could not be determined.
+ HUMAN_ALIGNMENT_UNRESOLVED = 4;
+}
+
+// SkillRole classifies the role a skill played in a session.
+enum SkillRole {
+ // SKILL_ROLE_UNSPECIFIED means not classified.
+ SKILL_ROLE_UNSPECIFIED = 0;
+ // SKILL_ROLE_PRODUCER means the skill produced an artifact.
+ SKILL_ROLE_PRODUCER = 1;
+ // SKILL_ROLE_REVIEWER means the skill reviewed an artifact.
+ SKILL_ROLE_REVIEWER = 2;
+ // SKILL_ROLE_BOTH means the skill both produced and reviewed.
+ SKILL_ROLE_BOTH = 3;
+}
+
+// OverallAttribution attributes what most drove a produced artifact's outcome.
+enum OverallAttribution {
+ // OVERALL_ATTRIBUTION_UNSPECIFIED means not attributed.
+ OVERALL_ATTRIBUTION_UNSPECIFIED = 0;
+ // OVERALL_ATTRIBUTION_ARTIFACT_SKILL means a producing skill drove it.
+ OVERALL_ATTRIBUTION_ARTIFACT_SKILL = 1;
+ // OVERALL_ATTRIBUTION_REVIEW_SKILL means a reviewing skill drove it.
+ OVERALL_ATTRIBUTION_REVIEW_SKILL = 2;
+ // OVERALL_ATTRIBUTION_BOTH means both a producing and reviewing skill drove
+ // it.
+ OVERALL_ATTRIBUTION_BOTH = 3;
+ // OVERALL_ATTRIBUTION_PROMPT means the human's prompt drove it.
+ OVERALL_ATTRIBUTION_PROMPT = 4;
+ // OVERALL_ATTRIBUTION_UNRESOLVED means attribution could not be determined.
+ OVERALL_ATTRIBUTION_UNRESOLVED = 5;
+}
+
+// ── Harness finding ──
+
+// FindingAttributionKind attributes a harness finding to its cause.
+enum FindingAttributionKind {
+ // FINDING_ATTRIBUTION_KIND_UNSPECIFIED means not attributed.
+ FINDING_ATTRIBUTION_KIND_UNSPECIFIED = 0;
+ // FINDING_ATTRIBUTION_KIND_HARNESS means the harness caused the finding.
+ FINDING_ATTRIBUTION_KIND_HARNESS = 1;
+ // FINDING_ATTRIBUTION_KIND_PROMPT means the prompt caused the finding.
+ FINDING_ATTRIBUTION_KIND_PROMPT = 2;
+ // FINDING_ATTRIBUTION_KIND_MODEL means the model caused the finding.
+ FINDING_ATTRIBUTION_KIND_MODEL = 3;
+}
+
+// ArtifactRelation relates a harness finding to a harness artifact.
+enum ArtifactRelation {
+ // ARTIFACT_RELATION_UNSPECIFIED means no relation recorded.
+ ARTIFACT_RELATION_UNSPECIFIED = 0;
+ // ARTIFACT_RELATION_CAUSED means the artifact caused the finding.
+ ARTIFACT_RELATION_CAUSED = 1;
+ // ARTIFACT_RELATION_SHOULD_HAVE_BEEN_INVOKED means an artifact that should
+ // have been invoked was not.
+ ARTIFACT_RELATION_SHOULD_HAVE_BEEN_INVOKED = 2;
+ // ARTIFACT_RELATION_MISSING means a needed artifact does not exist.
+ ARTIFACT_RELATION_MISSING = 3;
+}
+
+// PhaseImpact grades how a harness finding affected the phase.
+enum PhaseImpact {
+ // PHASE_IMPACT_UNSPECIFIED means not judged.
+ PHASE_IMPACT_UNSPECIFIED = 0;
+ // PHASE_IMPACT_FASTER means it made the phase faster.
+ PHASE_IMPACT_FASTER = 1;
+ // PHASE_IMPACT_FRICTION_FREE means it made the phase friction-free.
+ PHASE_IMPACT_FRICTION_FREE = 2;
+ // PHASE_IMPACT_BOTH means it made the phase both faster and friction-free.
+ PHASE_IMPACT_BOTH = 3;
+}
+
+// VisibleVia records how a harness finding became visible.
+enum VisibleVia {
+ // VISIBLE_VIA_UNSPECIFIED means not recorded.
+ VISIBLE_VIA_UNSPECIFIED = 0;
+ // VISIBLE_VIA_INVOKED_BODY means it was visible in an invoked artifact's body.
+ VISIBLE_VIA_INVOKED_BODY = 1;
+ // VISIBLE_VIA_INFERRED means it was inferred rather than directly observed.
+ VISIBLE_VIA_INFERRED = 2;
+}
+
+// HarnessArtifactType classifies the kind of harness artifact a finding or
+// skill judgment refers to.
+enum HarnessArtifactType {
+ // HARNESS_ARTIFACT_TYPE_UNSPECIFIED means not classified.
+ HARNESS_ARTIFACT_TYPE_UNSPECIFIED = 0;
+ // HARNESS_ARTIFACT_TYPE_SKILL means a skill.
+ HARNESS_ARTIFACT_TYPE_SKILL = 1;
+ // HARNESS_ARTIFACT_TYPE_HOOK means a hook.
+ HARNESS_ARTIFACT_TYPE_HOOK = 2;
+ // HARNESS_ARTIFACT_TYPE_PLUGIN means a plugin.
+ HARNESS_ARTIFACT_TYPE_PLUGIN = 3;
+ // HARNESS_ARTIFACT_TYPE_AGENT means an agent definition.
+ HARNESS_ARTIFACT_TYPE_AGENT = 4;
+ // HARNESS_ARTIFACT_TYPE_RULE means a rule.
+ HARNESS_ARTIFACT_TYPE_RULE = 5;
+ // HARNESS_ARTIFACT_TYPE_CLAUDE_MD means a CLAUDE.md file.
+ HARNESS_ARTIFACT_TYPE_CLAUDE_MD = 6;
+ // HARNESS_ARTIFACT_TYPE_AGENTS_MD means an AGENTS.md file.
+ HARNESS_ARTIFACT_TYPE_AGENTS_MD = 7;
+ // HARNESS_ARTIFACT_TYPE_COMMAND means a command.
+ HARNESS_ARTIFACT_TYPE_COMMAND = 8;
+ // HARNESS_ARTIFACT_TYPE_PROMPT_TEMPLATE means a prompt template.
+ HARNESS_ARTIFACT_TYPE_PROMPT_TEMPLATE = 9;
+ // HARNESS_ARTIFACT_TYPE_PERMISSIONS means a permissions configuration.
+ HARNESS_ARTIFACT_TYPE_PERMISSIONS = 10;
+}
+
+// ── Coverage ──
+
+// SignalSet names one of the nine analysis signal sets whose coverage is
+// tracked.
+enum SignalSet {
+ // SIGNAL_SET_UNSPECIFIED means no signal set specified.
+ SIGNAL_SET_UNSPECIFIED = 0;
+ // SIGNAL_SET_TURN_TELEMETRY means the turn-telemetry signal set.
+ SIGNAL_SET_TURN_TELEMETRY = 1;
+ // SIGNAL_SET_LOOPS means the loops signal set.
+ SIGNAL_SET_LOOPS = 2;
+ // SIGNAL_SET_STEERING_QUALITY means the steering-quality signal set.
+ SIGNAL_SET_STEERING_QUALITY = 3;
+ // SIGNAL_SET_SESSION_OUTCOME means the session-outcome signal set.
+ SIGNAL_SET_SESSION_OUTCOME = 4;
+ // SIGNAL_SET_WASTE means the waste signal set.
+ SIGNAL_SET_WASTE = 5;
+ // SIGNAL_SET_HARNESS_USAGE means the harness-usage signal set.
+ SIGNAL_SET_HARNESS_USAGE = 6;
+ // SIGNAL_SET_MEMORY means the memory signal set.
+ SIGNAL_SET_MEMORY = 7;
+ // SIGNAL_SET_STAGE_TAGS means the stage-tags signal set.
+ SIGNAL_SET_STAGE_TAGS = 8;
+ // SIGNAL_SET_OUTCOME_LINKAGE means the outcome-linkage signal set.
+ SIGNAL_SET_OUTCOME_LINKAGE = 9;
+}
+
+// ProvenanceTier grades the provenance of a coverage cell's signal. Distinct
+// from the M/D/J/L column-annotation vocabulary in the data model — same
+// letters, different set. A fourth tier is an open question.
+enum ProvenanceTier {
+ // PROVENANCE_TIER_UNSPECIFIED means not graded.
+ PROVENANCE_TIER_UNSPECIFIED = 0;
+ // PROVENANCE_TIER_M means a directly measured signal.
+ PROVENANCE_TIER_M = 1;
+ // PROVENANCE_TIER_D means a signal derived from measured inputs.
+ PROVENANCE_TIER_D = 2;
+ // PROVENANCE_TIER_H means a heuristic/inferred signal.
+ PROVENANCE_TIER_H = 3;
+}
+
+// CoverageState grades whether a coverage cell's field is measured, derived,
+// estimated, or absent.
+enum CoverageState {
+ // COVERAGE_STATE_UNSPECIFIED means not graded.
+ COVERAGE_STATE_UNSPECIFIED = 0;
+ // COVERAGE_STATE_MEASURED means the field is measured.
+ COVERAGE_STATE_MEASURED = 1;
+ // COVERAGE_STATE_DERIVED means the field is derived.
+ COVERAGE_STATE_DERIVED = 2;
+ // COVERAGE_STATE_ESTIMATED means the field is estimated.
+ COVERAGE_STATE_ESTIMATED = 3;
+ // COVERAGE_STATE_NONE means the field is absent.
+ COVERAGE_STATE_NONE = 4;
+}
+
+// CoverageGrain names the grain a coverage cell reports at.
+enum CoverageGrain {
+ // COVERAGE_GRAIN_UNSPECIFIED means no grain specified.
+ COVERAGE_GRAIN_UNSPECIFIED = 0;
+ // COVERAGE_GRAIN_TURN means the turn grain.
+ COVERAGE_GRAIN_TURN = 1;
+ // COVERAGE_GRAIN_PHASE means the phase grain.
+ COVERAGE_GRAIN_PHASE = 2;
+ // COVERAGE_GRAIN_SESSION means the session grain.
+ COVERAGE_GRAIN_SESSION = 3;
+}
+
+// ── Telemetry (grounded from code) ──
+
+// DelegationLevel classifies how much a session was delegated to the agent.
+enum DelegationLevel {
+ // DELEGATION_LEVEL_UNSPECIFIED means not classified.
+ DELEGATION_LEVEL_UNSPECIFIED = 0;
+ // DELEGATION_LEVEL_INTERACTIVE means an interactive session.
+ DELEGATION_LEVEL_INTERACTIVE = 1;
+ // DELEGATION_LEVEL_ASSISTED means an assisted session (used a task agent).
+ DELEGATION_LEVEL_ASSISTED = 2;
+ // DELEGATION_LEVEL_DELEGATED means a delegated/background session.
+ DELEGATION_LEVEL_DELEGATED = 3;
+ // DELEGATION_LEVEL_UNKNOWN means the mode was not determinable; excluded from
+ // the known-mode buckets, never counted as interactive.
+ DELEGATION_LEVEL_UNKNOWN = 4;
+}
+
+// EffectivenessSource records how a session's effectiveness verdict was
+// determined; the closed set inherited from session_insights.
+enum EffectivenessSource {
+ // EFFECTIVENESS_SOURCE_UNSPECIFIED means no source recorded.
+ EFFECTIVENESS_SOURCE_UNSPECIFIED = 0;
+ // EFFECTIVENESS_SOURCE_CC_FACETS means Claude Code session facets (high
+ // confidence).
+ EFFECTIVENESS_SOURCE_CC_FACETS = 1;
+ // EFFECTIVENESS_SOURCE_CURSOR_CLASSIFICATION means Cursor's classification
+ // (medium confidence).
+ EFFECTIVENESS_SOURCE_CURSOR_CLASSIFICATION = 2;
+ // EFFECTIVENESS_SOURCE_CODE_COMMITTED means code was committed (low
+ // confidence).
+ EFFECTIVENESS_SOURCE_CODE_COMMITTED = 3;
+ // EFFECTIVENESS_SOURCE_UNKNOWN means the source could not be determined (low
+ // confidence).
+ EFFECTIVENESS_SOURCE_UNKNOWN = 4;
+}
+
+// SessionOutcome is the closed session-result enum. Unmapped Claude Code
+// passthrough tokens are mapped to SESSION_OUTCOME_UNSPECIFIED at parse rather
+// than dropped, so an unknown value stays queryable.
+enum SessionOutcome {
+ // SESSION_OUTCOME_UNSPECIFIED means unset or an unmapped passthrough token.
+ SESSION_OUTCOME_UNSPECIFIED = 0;
+ // SESSION_OUTCOME_FULLY_ACHIEVED means the session fully achieved its goal.
+ SESSION_OUTCOME_FULLY_ACHIEVED = 1;
+ // SESSION_OUTCOME_MOSTLY_ACHIEVED means it mostly achieved its goal.
+ SESSION_OUTCOME_MOSTLY_ACHIEVED = 2;
+ // SESSION_OUTCOME_PARTIALLY_ACHIEVED means it partly achieved its goal.
+ SESSION_OUTCOME_PARTIALLY_ACHIEVED = 3;
+ // SESSION_OUTCOME_NOT_ACHIEVED means it did not achieve its goal.
+ SESSION_OUTCOME_NOT_ACHIEVED = 4;
+ // SESSION_OUTCOME_ABANDONED means the session was abandoned.
+ SESSION_OUTCOME_ABANDONED = 5;
+}
+
+// PlanTierOrigin records how a session's plan tier was obtained. The tier
+// string itself is an open vendor pass-through (text); this is its queryable
+// dimension.
+enum PlanTierOrigin {
+ // PLAN_TIER_ORIGIN_UNSPECIFIED means origin not recorded.
+ PLAN_TIER_ORIGIN_UNSPECIFIED = 0;
+ // PLAN_TIER_ORIGIN_REPORTED means the tier was reported by the vendor.
+ PLAN_TIER_ORIGIN_REPORTED = 1;
+ // PLAN_TIER_ORIGIN_INFERRED means the tier was inferred, not reported.
+ PLAN_TIER_ORIGIN_INFERRED = 2;
+}
+
+// SessionAnalysisOrigin marks how a session row was produced: by the live engine,
+// or carried over by the session copy migration.
+enum SessionAnalysisOrigin {
+ // SESSION_ANALYSIS_ORIGIN_UNSPECIFIED is the proto3 zero; an unstamped row stores
+ // NULL and deserializes to nil, not this value.
+ SESSION_ANALYSIS_ORIGIN_UNSPECIFIED = 0;
+ // SESSION_ANALYSIS_ORIGIN_LIVE means the live engine produced the row.
+ SESSION_ANALYSIS_ORIGIN_LIVE = 1;
+ // SESSION_ANALYSIS_ORIGIN_COPY means the session copy migration carried
+ // the row over; a copied row is frozen history, not re-judged by the live engine.
+ SESSION_ANALYSIS_ORIGIN_COPY = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Appendix B — JSONB proto messages (protojson)
+// ─────────────────────────────────────────────────────────────────────────
+
+// CallStateMap holds the per-producer analysis state, keyed READ · EVIDENCE ·
+// DISCARD. Read whole and decoded in code — never SQL-filtered — so a later
+// producer re-split needs no migration.
+message CallStateMap {
+ // calls maps each producer key (READ, EVIDENCE, DISCARD) to its CallState.
+ map<string, CallState> calls = 1;
+}
+
+// CallState is one producer's analysis state within CallStateMap.
+message CallState {
+ // input_hash is the digest of the inputs this producer last ran against;
+ // drives content-change re-runs.
+ string input_hash = 1;
+ // contract_version is this producer's contract version at its last run;
+ // mirrored to a flat scalar for the SQL contract-behind scan.
+ int32 contract_version = 2;
+ // status is whether this producer ran, failed, was skipped, or was
+ // flag-skipped.
+ CallStatus status = 3;
+ // pending_artifact_ids are the exact unresolved artifact ids this producer is
+ // waiting on while status is CALL_STATUS_SKIPPED_PENDING_DATA — the persisted
+ // dependency so a re-pick reads only those artifacts' classification rows,
+ // never the S3 body. Empty otherwise. Decoded
+ // whole in code, never SQL-filtered.
+ repeated string pending_artifact_ids = 4;
+ // source_content_sha256 is the spine's body digest captured when this producer
+ // went CALL_STATUS_SKIPPED_PENDING_DATA; a re-pick abandons the
+ // pending_artifact_ids snapshot and re-runs in full when the current body
+ // digest differs (the conversation was re-uploaded), so it never trusts a
+ // stale dependency set. Empty otherwise.
+ string source_content_sha256 = 5;
+}
+
+// AnalysisTokenBreakdown is the input/output/cache token split for a turn or
+// session. Named to avoid colliding with the sibling TokenBreakdown, which has
+// a different (category/tokens/description) shape. Fidelity is carried by the
+// flat token_fidelity column, not a field here.
+message AnalysisTokenBreakdown {
+ // input_tokens is the un-cached, billed-at-input-rate token count.
+ int64 input_tokens = 1;
+ // output_tokens is the generated token count.
+ int64 output_tokens = 2;
+ // cache_read_tokens is the count served from cache.
+ int64 cache_read_tokens = 3;
+ // cache_write_tokens is the count written to cache.
+ int64 cache_write_tokens = 4;
+ // cache_creation_5m_input_tokens is the count written to the 5-minute
+ // ephemeral cache.
+ int64 cache_creation_5m_input_tokens = 5;
+ // cache_creation_1h_input_tokens is the count written to the 1-hour ephemeral
+ // cache.
+ int64 cache_creation_1h_input_tokens = 6;
+ // reasoning_output_tokens is the count spent on reasoning output.
+ int64 reasoning_output_tokens = 7;
+ // total_tokens is the total token count for the turn or session.
+ int64 total_tokens = 8;
+ // service_tier is the vendor service tier the call ran under.
+ string service_tier = 9;
+ // estimated_tokens is the estimated total when a measured count is
+ // unavailable; unset when tokens are measured. Vendor billing units (e.g. Kiro's
+ // fractional credits) are the flat session_turn_analyses.native_billing_units
+ // column, not a field here — one canonical, aggregation-friendly home.
+ optional int64 estimated_tokens = 10;
+}
+
+// ToolCall is one tool invocation within a turn.
+message ToolCall {
+ // name is the tool name (e.g. "Bash", "Read").
+ string name = 1;
+ // call_id is the vendor's identifier for this invocation.
+ string call_id = 2;
+ // outcome is the invocation's outcome.
+ SessionEventOutcome outcome = 3;
+ // failure_kind categorizes a failure; empty when the call did not fail.
+ string failure_kind = 4;
+}
+
+// FrictionCounts tallies friction events by type for a session or phase.
+message FrictionCounts {
+ // counts maps a friction-event type to its occurrence count.
+ map<string, int32> counts = 1;
+}
+
+// StringList wraps a repeated string for use as a JSONB column payload; the
+// column name carries the semantics, so it is reused across many columns
+// (languages, models_used, went_well, and the like). files_touched is NOT one
+// of them — it carries the richer FileTouchList (read/edited per file).
+// TouchKind distinguishes a file a turn read from one it edited.
+enum TouchKind {
+ // TOUCH_KIND_UNSPECIFIED means the touch kind was not recorded.
+ TOUCH_KIND_UNSPECIFIED = 0;
+ // TOUCH_KIND_READ means the turn read the file, not edited it.
+ TOUCH_KIND_READ = 1;
+ // TOUCH_KIND_EDITED means the turn wrote to the file.
+ TOUCH_KIND_EDITED = 2;
+}
+
+// FileTouch is one file a turn touched, with how it was touched.
+message FileTouch {
+ // path is the file path, redacted to the repo-relative form on the device.
+ string path = 1;
+ // touch_kind is read vs edited; UNSPECIFIED when the source did not say.
+ TouchKind touch_kind = 2;
+}
+
+// FileTouchList is the read/edited file set for a turn (session-turn-telemetry
+// design) — the richer files-touched jsonb shape, distinct from the names-only
+// StringList.
+message FileTouchList {
+ // items is the turn's set of touched files, one entry per file.
+ repeated FileTouch items = 1;
+}
+
+message StringList {
+ // values is the list of strings; the owning column names what they are.
+ repeated string values = 1;
+}
+
+// List-wrapper messages for the repeated-element JSONB columns. A JSONB column
+// stores a protojson-marshalled proto MESSAGE, and protojson cannot
+// marshal a bare repeated field at the top level, so a plural column wraps its
+// elements in a single-field list message (the same shape as StringList).
+message ToolCallList {
+ // items is the turn's tool calls (the tools column).
+ repeated ToolCall items = 1;
+}
+
+// TurnModel is one model that served a turn, with the reasoning effort it ran at. Effort is
+// carried here per model rather than in a flat column so a turn that used more than one model
+// keeps each model's effort; the owning column is models.
+message TurnModel {
+ // model is the model that served the turn, verbatim (may be a router alias such as "auto").
+ string model = 1;
+ // effort is the reasoning effort the model ran at (vendor token, e.g. "high"); empty when the
+ // surface does not report it.
+ string effort = 2;
+}
+
+// TurnModelList wraps a turn's models and their per-model effort as one JSONB message.
+message TurnModelList {
+ // items is the turn's models with their efforts (the models column).
+ repeated TurnModel items = 1;
+}
+
+// PromptIssueList wraps a turn's prompt-quality and leak issues so the repeated
+// value round-trips as a single JSONB message.
+message PromptIssueList {
+ // items is the turn's prompt-quality/leak issues (the prompt_issues column).
+ repeated PromptIssue items = 1;
+}
+
+// PhaseCoachingList wraps a phase's coaching notes as one JSONB message.
+message PhaseCoachingList {
+ // items is the phase's coaching notes (the coaching column).
+ repeated PhaseCoaching items = 1;
+}
+
+// InvokedSkillJudgmentList wraps a session's per-invoked-skill judgments as one JSONB message.
+message InvokedSkillJudgmentList {
+ // items is the session's per-skill judgments (the invoked_skills column).
+ repeated InvokedSkillJudgment items = 1;
+}
+
+// ArtifactAdjudicationList wraps a session's artifact adjudications as one JSONB message.
+message ArtifactAdjudicationList {
+ // items is the session's artifact adjudications (the artifact_adjudications column).
+ repeated ArtifactAdjudication items = 1;
+}
+
+// HarnessFindingList wraps a session's harness findings as one JSONB message.
+message HarnessFindingList {
+ // items is the session's harness findings (the harness_findings column).
+ repeated HarnessFinding items = 1;
+}
+
+// DiscardedRangeList wraps a session's discarded work ranges as one JSONB message.
+message DiscardedRangeList {
+ // items is the session's discarded work ranges (the discarded_ranges column).
+ repeated DiscardedRange items = 1;
+}
+
+// SignalCoverageList wraps a session's signal-coverage cells as one JSONB message.
+message SignalCoverageList {
+ // items is the session's signal-coverage cells (the signal_coverage column).
+ repeated SignalCoverageCell items = 1;
+}
+
+// PromptIssue is one prompt-quality (or leak) issue found in a turn.
+message PromptIssue {
+ // slug identifies the issue from the closed vocabulary.
+ PromptIssueSlug slug = 1;
+ // severity grades the issue.
+ IssueSeverity severity = 2;
+ // layer names the prompt layer the issue sits in.
+ string layer = 3;
+ // note is a short free-text description of the issue.
+ string note = 4;
+}
+
+// SdlcStageSet is the lean set of SDLC stages a phase touched (no transitions
+// sub-array).
+message SdlcStageSet {
+ // stages is the set of SDLC stages the phase touched.
+ repeated SdlcStage stages = 1;
+}
+
+// PhaseCoaching is one coaching suggestion attached to a phase.
+message PhaseCoaching {
+ // root_cause is the diagnosed root cause the suggestion addresses.
+ string root_cause = 1;
+ // suggestion is the coaching suggestion text.
+ string suggestion = 2;
+ // target is what the suggestion targets (e.g. a practice or artifact).
+ string target = 3;
+ // lever is the coaching lever the suggestion pulls.
+ CoachingLever lever = 4;
+ // axes are the improvement dimensions the suggestion aims at.
+ repeated CoachingAxis axes = 5;
+ // evidence_prompt_index points at the turn that evidences the suggestion.
+ int32 evidence_prompt_index = 6;
+}
+
+// InvokedSkillJudgment is the judged assessment of one skill/command invoked
+// during a session.
+message InvokedSkillJudgment {
+ // invocation_ref references the invocation within the session.
+ string invocation_ref = 1;
+ // artifact_name is the skill/command name.
+ string artifact_name = 2;
+ // source is how the skill was invoked (e.g. user-typed vs auto).
+ string source = 3;
+ // baseline_intent is what the skill is expected to do.
+ string baseline_intent = 4;
+ // contribution is what the invocation actually contributed.
+ string contribution = 5;
+ // artifact_type classifies the invoked artifact.
+ HarnessArtifactType artifact_type = 6;
+ // prompt_index points at the turn that invoked the skill.
+ int32 prompt_index = 7;
+ // evidence_prompt_index points at the turn that evidences this judgment.
+ int32 evidence_prompt_index = 8;
+ // input_contract is what the skill needed from the human's input.
+ InputContract input_contract = 9;
+ // contract_satisfied is whether the input contract was satisfied; unset when
+ // not assessed.
+ optional bool contract_satisfied = 10;
+ // role is the role the skill played.
+ SkillRole role = 11;
+ // contract_compliance grades whether the skill met its contract.
+ ContractCompliance contract_compliance = 12;
+ // output_quality grades the skill's output.
+ OutputQuality output_quality = 13;
+ // execution_reliability grades how reliably the skill ran.
+ ExecutionReliability execution_reliability = 14;
+ // human_alignment grades how the human responded to the output.
+ HumanAlignment human_alignment = 15;
+ // skill_verdict is the overall verdict on the skill's contribution.
+ SkillVerdict skill_verdict = 16;
+}
+
+// ArtifactAdjudication is the judged adjudication of one produced artifact and
+// the review contract applied to it.
+message ArtifactAdjudication {
+ // artifact_ref references the adjudicated artifact.
+ string artifact_ref = 1;
+ // overall_attribution attributes what most drove the artifact's outcome.
+ OverallAttribution overall_attribution = 2;
+ // human_signal_present is whether a human acceptance/rejection signal exists.
+ bool human_signal_present = 3;
+ // findings_accepted is the count of review findings the author accepted.
+ int32 findings_accepted = 4;
+ // findings_rejected is the count of review findings the author rejected.
+ int32 findings_rejected = 5;
+ // findings_modified is the count of review findings the author modified.
+ int32 findings_modified = 6;
+ // findings_deferred is the count of review findings the author deferred.
+ int32 findings_deferred = 7;
+ // findings_unresolved is the count of review findings left unresolved.
+ int32 findings_unresolved = 8;
+ // gates_total is the count of contract gates evaluated.
+ int32 gates_total = 9;
+ // gates_violated is the count of contract gates violated.
+ int32 gates_violated = 10;
+ // gates_clause_not_real is the count of gate clauses judged not to be real
+ // requirements.
+ int32 gates_clause_not_real = 11;
+ // contract_checks are the per-gate contract checks.
+ repeated ContractCheck contract_checks = 12;
+}
+
+// ContractCheck is one gate-clause check within an ArtifactAdjudication.
+message ContractCheck {
+ // gate_ref references the gate clause checked.
+ string gate_ref = 1;
+ // clause_is_a_real_requirement is whether the clause is a genuine
+ // requirement (vs a spurious one).
+ bool clause_is_a_real_requirement = 2;
+ // evidence_seq points at the evidence supporting the check.
+ int32 evidence_seq = 3;
+}
+
+// HarnessFinding is one judged finding about how the harness helped or hurt a
+// phase.
+message HarnessFinding {
+ // preference_signal is the observed preference the finding rests on.
+ string preference_signal = 1;
+ // agent_default is what the agent would do by default.
+ string agent_default = 2;
+ // author_preference is what the author preferred instead.
+ string author_preference = 3;
+ // invoked_skill names an invoked skill related to the finding, if any.
+ string invoked_skill = 4;
+ // both_valid is whether the agent default and author preference are both
+ // valid.
+ bool both_valid = 5;
+ // attribution attributes the finding to harness, prompt, or model.
+ FindingAttributionKind attribution = 6;
+ // artifact_type classifies the related harness artifact.
+ HarnessArtifactType artifact_type = 7;
+ // artifact_relation relates the finding to that artifact.
+ ArtifactRelation artifact_relation = 8;
+ // phase_ref points at the phase the finding belongs to.
+ int32 phase_ref = 9;
+ // evidence_prompt_index points at the turn that evidences the finding.
+ int32 evidence_prompt_index = 10;
+ // phase_impact grades how the finding affected the phase.
+ PhaseImpact phase_impact = 11;
+ // visible_via records how the finding became visible.
+ VisibleVia visible_via = 12;
+}
+
+// DiscardedRange is a contiguous span of turns the agent produced that was
+// later discarded.
+message DiscardedRange {
+ // range_start is the first turn index in the discarded span (inclusive).
+ int32 range_start = 1;
+ // range_end is the last turn index in the discarded span (inclusive).
+ int32 range_end = 2;
+ // evidence_prompt_index points at the turn that evidences the discard.
+ int32 evidence_prompt_index = 3;
+ // reason is why the span was discarded.
+ string reason = 4;
+ // token_sum is the total tokens spent on the discarded span.
+ int64 token_sum = 5;
+}
+
+// SignalCoverageCell is one cell of the signal-coverage matrix: how well one
+// field of one signal set is covered at one grain for one tool.
+message SignalCoverageCell {
+ // signal_set is the signal set this cell reports on.
+ SignalSet signal_set = 1;
+ // numerator is the covered count.
+ int32 numerator = 2;
+ // denominator is the eligible count.
+ int32 denominator = 3;
+ // field_name is the field within the signal set this cell measures.
+ string field_name = 4;
+ // grain is the grain the cell reports at.
+ CoverageGrain grain = 5;
+ // tool is the coding tool the cell is scoped to (the IdeType set).
+ sessionintelligence.common.v1.IdeType tool = 6;
+ // provenance_tier grades the provenance of the covered signal.
+ ProvenanceTier provenance_tier = 7;
+ // coverage_state grades whether the field is measured, derived, estimated, or
+ // absent.
+ CoverageState coverage_state = 8;
+}

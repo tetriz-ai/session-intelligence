@@ -1,0 +1,158 @@
+{
+  "id": "8e62e5016e5d69a76f059404ba0307ea5c5f61cc1fb1a7b88bddc4630b4fde4b",
+  "ide_type": "codex",
+  "session_id": "thread-fixture-001",
+  "conversation": [
+    {
+      "role": "user",
+      "content": "Write a sort function",
+      "timestamp": "2026-04-01T10:00:05.000Z",
+      "metadata": {
+        "model": "o3"
+      }
+    },
+    {
+      "role": "assistant",
+      "content": "Here is the sort function:",
+      "metadata": {
+        "model": "o3",
+        "filesEdited": [
+          "src/sort.ts"
+        ],
+        "linesAdded": 0,
+        "linesRemoved": 0,
+        "inputTokens": 20,
+        "outputTokens": 50,
+        "cacheReadInputTokens": 5,
+        "tokenFidelity": "TOKEN_FIDELITY_MEASURED"
+      }
+    }
+  ],
+  "project_path": "/home/user/project",
+  "repo_name": "org/repo",
+  "last_mtime_ms": 1743494430000,
+  "last_size": 2,
+  "last_offset": 0,
+  "conversation_source_created_at_ms": 1743494400000,
+  "session_meta": {
+    "git_branch": "feat/sort",
+    "git_branches": [
+      "feat/sort"
+    ],
+    "source": "cli",
+    "session_title": "Write sort function",
+    "tracked_file_paths": [
+      "src/sort.ts"
+    ],
+    "files_edited": [
+      "src/sort.ts"
+    ],
+    "git_sha": "abc123def456",
+    "reasoning_effort": "medium",
+    "uses_extended_thinking": true,
+    "memory_mode": "enabled",
+    "approval_mode": "suggest",
+    "sandbox_policy": "sandbox-all",
+    "first_prompt": "Write a sort function",
+    "uses_mcp": true,
+    "tool_counts": {
+      "github/list_repos": 1
+    },
+    "user_interruptions": 1,
+    "compaction_count": 1,
+    "last_prompt": "Write a sort function",
+    "user_message_timestamps": [
+      "2026-04-01T10:00:05.000Z"
+    ],
+    "message_hours": [
+      10
+    ]
+  },
+  "session_facets": null,
+  "installation_metadata": {
+    "plan_tier": "unknown",
+    "plan_tier_source": "codex_auth_json_missing",
+    "entrypoint": "codex-cli",
+    "cc_version": "1.2.3"
+  },
+  "stats_cache": null,
+  "ai_attribution": null,
+  "sync_status": "pending",
+  "content_hash": "2239d78bfb01d9ba3516e5e58316564823dfafbdf096125f9c30afb2a2e56d60",
+  "tokens_observed": 0,
+  "relation_type": "PRIMARY",
+  "session_events": [
+    {
+      "sequence": 1,
+      "occurred_at": "1970-01-01T00:00:00.000Z",
+      "kind": "SESSION_EVENT_KIND_TOOL_CALL",
+      "operation_name": "exec_command",
+      "call_id": "codex-end-1",
+      "outcome": "SESSION_EVENT_OUTCOME_UNKNOWN",
+      "redacted_summary": "cat src/sort.ts"
+    },
+    {
+      "sequence": 2,
+      "occurred_at": "1970-01-01T00:00:00.000Z",
+      "kind": "SESSION_EVENT_KIND_TOOL_RESULT",
+      "parent_call_id": "codex-end-1",
+      "outcome": "SESSION_EVENT_OUTCOME_SUCCEEDED"
+    },
+    {
+      "sequence": 3,
+      "occurred_at": "1970-01-01T00:00:00.000Z",
+      "kind": "SESSION_EVENT_KIND_TOOL_CALL",
+      "operation_name": "apply_patch",
+      "call_id": "codex-end-2",
+      "outcome": "SESSION_EVENT_OUTCOME_UNKNOWN",
+      "redacted_summary": "src/sort.ts"
+    },
+    {
+      "sequence": 4,
+      "occurred_at": "1970-01-01T00:00:00.000Z",
+      "kind": "SESSION_EVENT_KIND_TOOL_RESULT",
+      "parent_call_id": "codex-end-2",
+      "outcome": "SESSION_EVENT_OUTCOME_SUCCEEDED"
+    },
+    {
+      "sequence": 5,
+      "occurred_at": "1970-01-01T00:00:00.000Z",
+      "kind": "SESSION_EVENT_KIND_TOOL_CALL",
+      "operation_name": "list_repos",
+      "call_id": "codex-end-3",
+      "outcome": "SESSION_EVENT_OUTCOME_UNKNOWN",
+      "redacted_summary": "github/list_repos"
+    },
+    {
+      "sequence": 6,
+      "occurred_at": "1970-01-01T00:00:00.000Z",
+      "kind": "SESSION_EVENT_KIND_TOOL_RESULT",
+      "parent_call_id": "codex-end-3",
+      "outcome": "SESSION_EVENT_OUTCOME_SUCCEEDED"
+    },
+    {
+      "sequence": 7,
+      "occurred_at": "2026-04-01T10:00:05.000Z",
+      "kind": "SESSION_EVENT_KIND_PROMPT_REFERENCE",
+      "outcome": "SESSION_EVENT_OUTCOME_SUCCEEDED",
+      "prompt_ordinal": 1,
+      "author": "SESSION_EVENT_AUTHOR_HUMAN"
+    },
+    {
+      "sequence": 8,
+      "occurred_at": "1970-01-01T00:00:00.000Z",
+      "kind": "SESSION_EVENT_KIND_PROMPT_REFERENCE",
+      "outcome": "SESSION_EVENT_OUTCOME_SUCCEEDED",
+      "prompt_ordinal": 2,
+      "author": "SESSION_EVENT_AUTHOR_AGENT"
+    },
+    {
+      "sequence": 9,
+      "occurred_at": "1970-01-01T00:00:00.000Z",
+      "kind": "SESSION_EVENT_KIND_TURN_COMPLETED",
+      "outcome": "SESSION_EVENT_OUTCOME_SUCCEEDED"
+    }
+  ],
+  "event_coverage": "EVENT_COVERAGE_COMPLETE",
+  "extractor_version": null
+}

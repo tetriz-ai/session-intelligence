@@ -1,0 +1,150 @@
+// Copyright 2026 Workloom Solutions Private Limited
+// SPDX-License-Identifier: MIT
+
+// This package defines only the harness-artifact classification types the engine
+// uses: the lifecycle stage, the per-artifact intent class, and the stored
+// classification verdict.
+syntax = "proto3";
+
+package sessionintelligence.aidlc.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/tetriz-ai/session-intelligence/gen/sessionintelligence/aidlc/v1;coreaidlcv1";
+
+// AidlcStage is the software-lifecycle stage an artifact serves.
+enum AidlcStage {
+  // AIDLC_STAGE_UNSPECIFIED on a classification verdict is the classifier's
+  // definitive "serves no lifecycle stage" (an exclusion bucket or none): a read
+  // answer, distinct from an artifact that has no verdict at all.
+  AIDLC_STAGE_UNSPECIFIED = 0;
+  // AIDLC_STAGE_PRODUCT_SPEC covers deciding and writing what to build.
+  AIDLC_STAGE_PRODUCT_SPEC = 1;
+  // AIDLC_STAGE_TECH_SPEC covers the technical design of an agreed change.
+  AIDLC_STAGE_TECH_SPEC = 2;
+  // AIDLC_STAGE_PLAN covers breaking a design into sequenced, assignable work.
+  AIDLC_STAGE_PLAN = 3;
+  // AIDLC_STAGE_CODE covers authoring the change itself.
+  AIDLC_STAGE_CODE = 4;
+  // AIDLC_STAGE_REVIEW covers assessing a proposed change before it merges.
+  AIDLC_STAGE_REVIEW = 5;
+  // AIDLC_STAGE_TEST_QA covers deciding what to verify and verifying it.
+  AIDLC_STAGE_TEST_QA = 6;
+  // AIDLC_STAGE_CI_CD covers the build and delivery pipeline.
+  AIDLC_STAGE_CI_CD = 7;
+  // AIDLC_STAGE_DEPLOY covers releasing a change and rolling it back.
+  AIDLC_STAGE_DEPLOY = 8;
+  // AIDLC_STAGE_OPERATE covers running what has shipped — incidents, alerts, and
+  // remediation.
+  AIDLC_STAGE_OPERATE = 9;
+}
+
+// ArtifactIntentClass is the intent a harness artifact serves.
+enum ArtifactIntentClass {
+  // ARTIFACT_INTENT_CLASS_UNSPECIFIED means the row is unclassified.
+  ARTIFACT_INTENT_CLASS_UNSPECIFIED = 0;
+  // ARTIFACT_INTENT_CLASS_REVIEW is a code-review artifact.
+  ARTIFACT_INTENT_CLASS_REVIEW = 1;
+  // ARTIFACT_INTENT_CLASS_MECHANICAL is a rote, deterministic transformation.
+  ARTIFACT_INTENT_CLASS_MECHANICAL = 2;
+  // ARTIFACT_INTENT_CLASS_EXPLORATORY is open-ended investigation with no fixed
+  // target shape.
+  ARTIFACT_INTENT_CLASS_EXPLORATORY = 3;
+  // ARTIFACT_INTENT_CLASS_ORCHESTRATOR coordinates other artifacts or agents rather
+  // than doing the work itself.
+  ARTIFACT_INTENT_CLASS_ORCHESTRATOR = 4;
+  // ARTIFACT_INTENT_CLASS_GATE is a policy or approval checkpoint.
+  ARTIFACT_INTENT_CLASS_GATE = 5;
+  // ARTIFACT_INTENT_CLASS_AMBIGUOUS is classifiable to no single intent above.
+  ARTIFACT_INTENT_CLASS_AMBIGUOUS = 6;
+}
+
+// IntentClassSource records how an artifact's intent class was set.
+enum IntentClassSource {
+  // INTENT_CLASS_SOURCE_UNSPECIFIED means the row is unclassified.
+  INTENT_CLASS_SOURCE_UNSPECIFIED = 0;
+  // INTENT_CLASS_SOURCE_CLASSIFIED means the intent-classify sweep produced this
+  // value; a later sweep may recompute it.
+  INTENT_CLASS_SOURCE_CLASSIFIED = 1;
+  // INTENT_CLASS_SOURCE_OVERRIDE means an operator set this value directly; the
+  // sweep never recomputes an override.
+  INTENT_CLASS_SOURCE_OVERRIDE = 2;
+}
+
+// HarnessClassificationTask names which classifier produced a verdict.
+enum HarnessClassificationTask {
+  // HARNESS_CLASSIFICATION_TASK_UNSPECIFIED means the task was not resolved.
+  HARNESS_CLASSIFICATION_TASK_UNSPECIFIED = 0;
+  // HARNESS_CLASSIFICATION_TASK_STAGE is the stage classifier: which lifecycle stage
+  // an artifact serves.
+  HARNESS_CLASSIFICATION_TASK_STAGE = 1;
+  // HARNESS_CLASSIFICATION_TASK_LOOP is the loop classifier. Nothing writes it yet;
+  // the value exists because the table is shaped for the loop classifier to migrate
+  // into.
+  HARNESS_CLASSIFICATION_TASK_LOOP = 2;
+}
+
+// HarnessClassificationAttemptState is the lease state of a classification row.
+enum HarnessClassificationAttemptState {
+  // HARNESS_CLASSIFICATION_ATTEMPT_STATE_UNSPECIFIED means the state was not
+  // resolved.
+  HARNESS_CLASSIFICATION_ATTEMPT_STATE_UNSPECIFIED = 0;
+  // HARNESS_CLASSIFICATION_ATTEMPT_STATE_IDLE means no attempt is in flight; the row
+  // is available to lease.
+  HARNESS_CLASSIFICATION_ATTEMPT_STATE_IDLE = 1;
+  // HARNESS_CLASSIFICATION_ATTEMPT_STATE_IN_FLIGHT means an attempt holds the row;
+  // every other version's sweep skips it until it concludes.
+  HARNESS_CLASSIFICATION_ATTEMPT_STATE_IN_FLIGHT = 2;
+}
+
+// HarnessClassificationOutcome is a classification attempt's terminal result.
+enum HarnessClassificationOutcome {
+  // HARNESS_CLASSIFICATION_OUTCOME_UNSPECIFIED means the outcome was not resolved.
+  HARNESS_CLASSIFICATION_OUTCOME_UNSPECIFIED = 0;
+  // HARNESS_CLASSIFICATION_OUTCOME_SUCCEEDED means the vote reached a majority and a
+  // verdict was stored.
+  HARNESS_CLASSIFICATION_OUTCOME_SUCCEEDED = 1;
+  // HARNESS_CLASSIFICATION_OUTCOME_UNRESOLVED means the samples produced no
+  // majority, so no verdict was stored rather than a guess.
+  HARNESS_CLASSIFICATION_OUTCOME_UNRESOLVED = 2;
+  // HARNESS_CLASSIFICATION_OUTCOME_EXHAUSTED means the attempt gave up after its
+  // retries without concluding.
+  HARNESS_CLASSIFICATION_OUTCOME_EXHAUSTED = 3;
+  // HARNESS_CLASSIFICATION_OUTCOME_UNREADABLE means the body could not be read when this
+  // version tried, so the body was never judged. Readers treat it as no entry for the
+  // version and fall back to another version's verdict; the sweep re-reads the body on its
+  // change-detection cadence and classifies it once it is readable again.
+  HARNESS_CLASSIFICATION_OUTCOME_UNREADABLE = 4;
+}
+
+// HarnessClassificationVerdict is the stored classification result for one artifact.
+message HarnessClassificationVerdict {
+  // stage is the classified lifecycle stage, set for the STAGE task.
+  AidlcStage stage = 1;
+  // loop_verdict is a placeholder for the future LOOP task and is not produced in
+  // v1.
+  string loop_verdict = 2;
+}
+
+// HarnessClassificationVerdictEntry is one classifier version's terminal entry for a row.
+message HarnessClassificationVerdictEntry {
+  // classifier_version is the version that produced this entry.
+  string classifier_version = 1;
+  // outcome is the version's terminal outcome. A non-SUCCEEDED entry is terminal and
+  // never serves.
+  HarnessClassificationOutcome outcome = 2;
+  // verdict is the stored verdict, set only when outcome is SUCCEEDED.
+  HarnessClassificationVerdict verdict = 3;
+  // body_digest is the digest of the canonicalised artifact body this entry was
+  // reached over — version-independent, so entries at different versions compare
+  // against the same body.
+  string body_digest = 4;
+  // concluded_at is when the version reached this terminal outcome.
+  google.protobuf.Timestamp concluded_at = 5;
+}
+
+// HarnessClassificationVerdicts holds the per-version verdict entries for one row.
+message HarnessClassificationVerdicts {
+  // by_version maps a classifier version to its terminal entry for the row.
+  map<string, HarnessClassificationVerdictEntry> by_version = 1;
+}

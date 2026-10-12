@@ -1,0 +1,32 @@
+// Copyright 2026 Workloom Solutions Private Limited
+// SPDX-License-Identifier: MIT
+
+syntax = "proto3";
+
+package sessionintelligence.common.v1;
+
+option go_package = "github.com/tetriz-ai/session-intelligence/gen/sessionintelligence/common/v1;commonv1";
+
+// PageContextRequest carries cursor-based pagination parameters.
+// The first request omits both tokens; subsequent requests pass
+// either before_token (previous page) or after_token (next page).
+message PageContextRequest {
+ oneof token {
+ string before_token = 1;
+ string after_token = 2;
+ }
+ uint32 page_size = 3;
+ uint32 page = 4; // 1-indexed page number for offset-based pagination
+}
+
+// PageContextResponse carries pagination state for the client.
+// has_before / has_after indicate whether more pages exist in
+// each direction; the corresponding token is used to fetch them.
+message PageContextResponse {
+ string before_token = 1;
+ bool has_before = 2;
+ string after_token = 3;
+ bool has_after = 4;
+ uint32 total_count = 5;
+ uint32 total_pages = 6;
+}
