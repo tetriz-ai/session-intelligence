@@ -11,6 +11,8 @@
 
 Understand your prompting habits and get specific insights to improve how you work with AI coding agents. Session Intelligence helps individuals and teams see where prompts lack context, why sessions need repeated corrections, what went well, and where time or tokens were wasted. It also flags exposed secrets and personal data. Bring your own LLM; no Session Intelligence SaaS or account is required.
 
+<a href="https://www.producthunt.com/products/agent-desk-and-session-intelligence?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-agent-desk-session-intelligence" target="_blank" rel="noopener noreferrer"><img alt="Agent Desk + Session Intelligence - Find past AI coding sessions and learn what went wrong | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1277547&amp;theme=light&amp;t=1791878454472"></a>
+
 **Choose your path:**
 
 - **[Analyze your own sessions](#analyze-your-own-sessions):** collect a transcript, run the analysis, and use the findings to improve your next session.
