@@ -2,12 +2,12 @@
 # Exposes POST /api/v1/generate-content (session-analysis + analyze-prompt task
 # types) and POST /api/v1/detect-round-trips. The provider key is supplied at run
 # time via the LLM__GEMINI_API_KEY environment variable and is never baked in.
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8
 
 WORKDIR /app
 
 # Pin uv for reproducible dependency resolution.
-ARG UV_VERSION=0.10.4
+ARG UV_VERSION=0.13.5
 RUN pip install --no-cache-dir "uv==${UV_VERSION}"
 
 # Resolve the locked dependency set first for layer caching. --no-install-project

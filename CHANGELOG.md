@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Security
+
+- The reference LLM service locks certifi 2026.10.19, which distrusts the compromised eMudhra (emSign) intermediate CA keys. Its image pins `python:3.11-slim` by digest and installs uv 0.13.5.
+
 ## [0.1.0] - 2026-10-12
 
 ### Added
